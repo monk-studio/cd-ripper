@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/cdr-core", "crates/cdr-cli"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+ureq = "2"

@@ -1,0 +1,14 @@
+[package]
+name = "cdr-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cdr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cdr-core = { path = "../cdr-core" }
