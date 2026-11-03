@@ -1,6 +1,7 @@
-//! macOS drive access through the IOCDMediaBSDClient ioctls on `/dev/diskN`
-//! (see IOKit/storage/IOCDMediaBSDClient.h). Same path XLD uses; no SCSI
-//! task user client or exclusive access needed.
+//! macOS drive access through the IOCDMediaBSDClient ioctls (see
+//! IOKit/storage/IOCDMediaBSDClient.h), as XLD does; no SCSI task user client
+//! or exclusive access needed. We open the raw `/dev/rdiskN` node: the block
+//! node is busy while cddafs has the disc mounted.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -55,7 +56,8 @@ pub struct MacDrive {
 
 impl MacDrive {
     pub fn open(device: &str) -> anyhow::Result<Self> {
-        let file = File::open(device).with_context(|| format!("opening {device}"))?;
+        let device = device.replacen("/dev/disk", "/dev/rdisk", 1);
+        let file = File::open(&device).with_context(|| format!("opening {device}"))?;
         Ok(Self {
             file,
             model: drutil_model(),
