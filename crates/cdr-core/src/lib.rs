@@ -2,6 +2,7 @@ pub mod accuraterip;
 pub mod coverart;
 pub mod drive;
 pub mod flac;
+pub mod library;
 pub mod musicbrainz;
 pub mod tags;
 pub mod toc;

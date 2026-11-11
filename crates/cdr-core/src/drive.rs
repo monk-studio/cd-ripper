@@ -15,5 +15,6 @@ pub trait CdDrive {
     }
 }
 
+pub mod image;
 #[cfg(target_os = "macos")]
 pub mod macos;

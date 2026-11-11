@@ -1,12 +1,12 @@
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use cdr_core::accuraterip::{self, DiscIds, Submission};
 use cdr_core::drive::CdDrive;
 use cdr_core::musicbrainz::{self, DiscToc, Release};
 use cdr_core::tags::Tags;
-use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, coverart, flac};
+use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, coverart, flac, library};
 use clap::Parser;
 
 /// Rips an audio CD and verifies it against AccurateRip.
@@ -18,15 +18,24 @@ struct Args {
     /// Drive read offset in samples. Detected from AccurateRip when omitted.
     #[arg(long, allow_hyphen_values = true)]
     offset: Option<i32>,
-    /// Directory to write one tagged FLAC per track, plus cover art, into.
+    /// Music library folder (local or a mounted share) to file the tagged FLACs into.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Path of each track inside the library; see cdr_core::library for placeholders.
+    #[arg(long, default_value = library::DEFAULT_TEMPLATE)]
+    template: String,
+    /// Replace tracks that already exist in the library.
+    #[arg(long)]
+    overwrite: bool,
     /// MusicBrainz release ID to tag with. Asked for when several releases match.
     #[arg(long)]
     release: Option<String>,
     /// Only print the TOC, disc IDs and matching releases.
     #[arg(long)]
     toc_only: bool,
+    /// Read a folder of per-track WAVs (01.wav, ...) instead of a drive. For testing.
+    #[arg(long, hide = true)]
+    image: Option<PathBuf>,
 }
 
 const SECTORS_PER_READ: u32 = 32;
@@ -34,7 +43,10 @@ const READ_ATTEMPTS: u32 = 3;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut drive = open_drive(args.device.as_deref())?;
+    let mut drive: Box<dyn CdDrive> = match &args.image {
+        Some(dir) => Box::new(cdr_core::drive::image::ImageDrive::open(dir)?),
+        None => open_drive(args.device.as_deref())?,
+    };
     if let Some(model) = drive.model() {
         println!("Drive: {model}");
     }
@@ -76,18 +88,42 @@ fn main() -> anyhow::Result<()> {
         Some(r) => println!("Tagging as: {} — {}", r.artist, r.title),
         None => println!("  no MusicBrainz match; tracks stay untitled"),
     }
-    let db = accuraterip::fetch(&ids).context("querying AccurateRip")?;
-    match &db {
-        Some(subs) => println!("  {} submission(s) in the database", subs.len()),
-        None => println!("  disc not in the database"),
-    }
-
     let audio: Vec<_> = toc
         .tracks
         .iter()
         .enumerate()
         .filter(|(_, t)| t.is_audio)
         .collect();
+
+    // Decide every destination before the slow read, so a clash stops us early.
+    let tags: Vec<Tags> = (0..audio.len())
+        .map(|n| Tags::for_track(release, &disc.disc_id(), n, audio.len()))
+        .collect();
+    let dests: Vec<PathBuf> = match &args.out {
+        Some(root) => tags
+            .iter()
+            .map(|t| root.join(library::track_path(&args.template, t)))
+            .collect(),
+        None => Vec::new(),
+    };
+    let existing: Vec<_> = dests.iter().filter(|p| p.exists()).collect();
+    if !existing.is_empty() && !args.overwrite {
+        bail!(
+            "{} track(s) already in the library, e.g. {}; pass --overwrite to replace them",
+            existing.len(),
+            existing[0].display()
+        );
+    }
+    if let Some(d) = dests.first() {
+        println!("Filing into: {}", d.parent().unwrap_or(d).display());
+    }
+
+    let db = accuraterip::fetch(&ids).context("querying AccurateRip")?;
+    match &db {
+        Some(subs) => println!("  {} submission(s) in the database", subs.len()),
+        None => println!("  disc not in the database"),
+    }
+
     let first = audio[0].1.start;
     let end = toc.audio_end();
     let pcm = read_range(drive.as_mut(), first, end)?;
@@ -113,17 +149,30 @@ fn main() -> anyhow::Result<()> {
     let stream = accuraterip::apply_offset(&raw, offset);
     drop(raw);
 
-    let cover = match (&args.out, release) {
-        (Some(dir), Some(r)) => {
-            std::fs::create_dir_all(dir)?;
-            fetch_cover(dir, r)
-        }
-        (Some(dir), None) => {
-            std::fs::create_dir_all(dir)?;
-            None
-        }
+    // Encode locally, then copy into the library: a network share only sees finished files.
+    let staging = std::env::temp_dir().join(format!("cdr-{}", std::process::id()));
+    std::fs::create_dir_all(&staging)?;
+    let cover = match (args.out.is_some(), release) {
+        (true, Some(r)) => fetch_cover(r),
         _ => None,
     };
+    if let Some(c) = &cover {
+        let name = format!(
+            "cover.{}",
+            if c.mime_type == "image/png" {
+                "png"
+            } else {
+                "jpg"
+            }
+        );
+        let staged = staging.join(&name);
+        std::fs::write(&staged, &c.data)?;
+        let mut folders: Vec<&Path> = dests.iter().filter_map(|d| d.parent()).collect();
+        folders.dedup();
+        for folder in folders {
+            library::install(&staged, &folder.join(&name))?;
+        }
+    }
     let mut accurate = 0;
     for (n, &(i, t)) in audio.iter().enumerate() {
         let from = (t.start - first) as usize * SECTOR_SAMPLES;
@@ -146,16 +195,14 @@ fn main() -> anyhow::Result<()> {
             "  track {:2}  v1 {:08x}  v2 {:08x}  {verdict}{title}",
             t.number, sums.v1, sums.v2
         );
-        if let Some(dir) = &args.out {
-            let tags = Tags::for_track(release, &disc.disc_id(), n, audio.len());
-            flac::write(
-                &dir.join(format!("{:02}.flac", t.number)),
-                samples,
-                &tags,
-                cover.as_ref(),
-            )?;
+        if let Some(dest) = dests.get(n) {
+            let staged = staging.join(format!("{:02}.flac", t.number));
+            flac::write(&staged, samples, &tags[n], cover.as_ref())?;
+            library::install(&staged, dest)?;
+            std::fs::remove_file(&staged)?;
         }
     }
+    std::fs::remove_dir_all(&staging).ok();
     if db.is_some() {
         println!("{accurate} of {} tracks accurately ripped", audio.len());
     }
@@ -180,18 +227,10 @@ fn open_drive(device: Option<&str>) -> anyhow::Result<Box<dyn CdDrive>> {
     }
 }
 
-/// Fetches the front cover and saves a copy next to the tracks. Failures only warn.
-fn fetch_cover(dir: &std::path::Path, release: &Release) -> Option<coverart::Cover> {
+/// Fetches the front cover. Failures only warn: a rip without art is still a rip.
+fn fetch_cover(release: &Release) -> Option<coverart::Cover> {
     match coverart::fetch(release) {
         Ok(Some(cover)) => {
-            let ext = if cover.mime_type == "image/png" {
-                "png"
-            } else {
-                "jpg"
-            };
-            if let Err(e) = std::fs::write(dir.join(format!("cover.{ext}")), &cover.data) {
-                eprintln!("  saving cover failed: {e}");
-            }
             println!("Cover: {} KB {}", cover.data.len() / 1024, cover.mime_type);
             Some(cover)
         }
