@@ -5,7 +5,8 @@ use anyhow::{Context, bail};
 use cdr_core::accuraterip::{self, DiscIds, Submission};
 use cdr_core::drive::CdDrive;
 use cdr_core::musicbrainz::{self, DiscToc, Release};
-use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, wav};
+use cdr_core::tags::Tags;
+use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, coverart, flac};
 use clap::Parser;
 
 /// Rips an audio CD and verifies it against AccurateRip.
@@ -17,7 +18,7 @@ struct Args {
     /// Drive read offset in samples. Detected from AccurateRip when omitted.
     #[arg(long, allow_hyphen_values = true)]
     offset: Option<i32>,
-    /// Directory to write one WAV per track into.
+    /// Directory to write one tagged FLAC per track, plus cover art, into.
     #[arg(long)]
     out: Option<PathBuf>,
     /// MusicBrainz release ID to tag with. Asked for when several releases match.
@@ -112,9 +113,17 @@ fn main() -> anyhow::Result<()> {
     let stream = accuraterip::apply_offset(&raw, offset);
     drop(raw);
 
-    if let Some(dir) = &args.out {
-        std::fs::create_dir_all(dir)?;
-    }
+    let cover = match (&args.out, release) {
+        (Some(dir), Some(r)) => {
+            std::fs::create_dir_all(dir)?;
+            fetch_cover(dir, r)
+        }
+        (Some(dir), None) => {
+            std::fs::create_dir_all(dir)?;
+            None
+        }
+        _ => None,
+    };
     let mut accurate = 0;
     for (n, &(i, t)) in audio.iter().enumerate() {
         let from = (t.start - first) as usize * SECTOR_SAMPLES;
@@ -138,7 +147,13 @@ fn main() -> anyhow::Result<()> {
             t.number, sums.v1, sums.v2
         );
         if let Some(dir) = &args.out {
-            wav::write(&dir.join(format!("{:02}.wav", t.number)), samples)?;
+            let tags = Tags::for_track(release, &disc.disc_id(), n, audio.len());
+            flac::write(
+                &dir.join(format!("{:02}.flac", t.number)),
+                samples,
+                &tags,
+                cover.as_ref(),
+            )?;
         }
     }
     if db.is_some() {
@@ -162,6 +177,32 @@ fn open_drive(device: Option<&str>) -> anyhow::Result<Box<dyn CdDrive>> {
     {
         let _ = device;
         bail!("no drive backend for this platform yet")
+    }
+}
+
+/// Fetches the front cover and saves a copy next to the tracks. Failures only warn.
+fn fetch_cover(dir: &std::path::Path, release: &Release) -> Option<coverart::Cover> {
+    match coverart::fetch(release) {
+        Ok(Some(cover)) => {
+            let ext = if cover.mime_type == "image/png" {
+                "png"
+            } else {
+                "jpg"
+            };
+            if let Err(e) = std::fs::write(dir.join(format!("cover.{ext}")), &cover.data) {
+                eprintln!("  saving cover failed: {e}");
+            }
+            println!("Cover: {} KB {}", cover.data.len() / 1024, cover.mime_type);
+            Some(cover)
+        }
+        Ok(None) => {
+            println!("  no cover in the Cover Art Archive");
+            None
+        }
+        Err(e) => {
+            eprintln!("  cover download failed: {e}");
+            None
+        }
     }
 }
 
