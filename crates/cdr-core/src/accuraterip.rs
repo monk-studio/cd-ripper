@@ -1,12 +1,13 @@
 //! AccurateRip disc IDs, checksums, database lookup and offset detection.
 //!
-//! Database access is regulated by its owner (Illustrate); see
-//! http://www.accuraterip.com/3rdparty-access.htm before shipping.
+//! Database access is regulated by its owner (Illustrate). Agreed terms
+//! (CDR-2): free while the app is donation-funded; clients must identify
+//! themselves in the User-Agent and cache lookups; submitting isn't possible.
 
 use std::io::Read;
 
-use crate::SECTOR_SAMPLES;
 use crate::toc::Toc;
+use crate::{SECTOR_SAMPLES, USER_AGENT};
 
 /// Samples skipped at the start of the first track and the end of the last one.
 const FIRST_TRACK_SKIP: usize = 5 * SECTOR_SAMPLES - 1;
@@ -118,7 +119,7 @@ pub fn parse_response(data: &[u8]) -> anyhow::Result<Vec<Submission>> {
 
 /// Fetches the database entry for a disc. `Ok(None)` means the disc isn't in it.
 pub fn fetch(ids: &DiscIds) -> anyhow::Result<Option<Vec<Submission>>> {
-    match ureq::get(&ids.url()).call() {
+    match ureq::get(&ids.url()).set("User-Agent", USER_AGENT).call() {
         Ok(resp) => {
             let mut data = Vec::new();
             resp.into_reader().read_to_end(&mut data)?;
