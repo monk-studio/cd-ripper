@@ -1,9 +1,10 @@
-use std::io::Write;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use cdr_core::accuraterip::{self, DiscIds, Submission};
 use cdr_core::drive::CdDrive;
+use cdr_core::musicbrainz::{self, DiscToc, Release};
 use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, wav};
 use clap::Parser;
 
@@ -19,7 +20,10 @@ struct Args {
     /// Directory to write one WAV per track into.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Only print the TOC and AccurateRip disc IDs.
+    /// MusicBrainz release ID to tag with. Asked for when several releases match.
+    #[arg(long)]
+    release: Option<String>,
+    /// Only print the TOC, disc IDs and matching releases.
     #[arg(long)]
     toc_only: bool,
 }
@@ -53,8 +57,23 @@ fn main() -> anyhow::Result<()> {
 
     let ids = DiscIds::from_toc(&toc);
     println!("AccurateRip: {}", ids.url());
+
+    let disc = DiscToc::from_toc(&toc);
+    println!("MusicBrainz: {}", disc.disc_id());
+    let releases = musicbrainz::lookup(&disc).unwrap_or_else(|e| {
+        eprintln!("  MusicBrainz lookup failed: {e}");
+        Vec::new()
+    });
+    for (i, r) in releases.iter().enumerate() {
+        println!("  {}) {}", i + 1, describe(r));
+    }
     if args.toc_only {
         return Ok(());
+    }
+    let release = choose_release(&releases, args.release.as_deref())?;
+    match release {
+        Some(r) => println!("Tagging as: {} — {}", r.artist, r.title),
+        None => println!("  no MusicBrainz match; tracks stay untitled"),
     }
     let db = accuraterip::fetch(&ids).context("querying AccurateRip")?;
     match &db {
@@ -110,8 +129,12 @@ fn main() -> anyhow::Result<()> {
             Some(None) => "NOT accurate".to_string(),
             None => "not checked".to_string(),
         };
+        let title = release
+            .and_then(|r| r.tracks.get(n))
+            .map(|m| format!("  {} — {}", m.artist, m.title))
+            .unwrap_or_default();
         println!(
-            "  track {:2}  v1 {:08x}  v2 {:08x}  {verdict}",
+            "  track {:2}  v1 {:08x}  v2 {:08x}  {verdict}{title}",
             t.number, sums.v1, sums.v2
         );
         if let Some(dir) = &args.out {
@@ -139,6 +162,61 @@ fn open_drive(device: Option<&str>) -> anyhow::Result<Box<dyn CdDrive>> {
     {
         let _ = device;
         bail!("no drive backend for this platform yet")
+    }
+}
+
+/// One line per candidate: enough to tell pressings apart.
+fn describe(r: &Release) -> String {
+    let details: Vec<&str> = [
+        r.date.as_deref(),
+        r.country.as_deref(),
+        r.label.as_deref(),
+        r.catalog_number.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "{} — {} ({}; disc {}/{}){}  {}",
+        r.artist,
+        r.title,
+        details.join(", "),
+        r.disc_number,
+        r.disc_total,
+        if r.exact { "" } else { " [TOC match]" },
+        r.id,
+    )
+}
+
+/// Picks the release named by `--release`, the only candidate, or asks on a terminal.
+fn choose_release<'a>(
+    releases: &'a [Release],
+    wanted: Option<&str>,
+) -> anyhow::Result<Option<&'a Release>> {
+    if let Some(id) = wanted {
+        return match releases.iter().find(|r| r.id == id) {
+            Some(r) => Ok(Some(r)),
+            None => bail!("release {id} doesn't match this disc"),
+        };
+    }
+    if releases.len() <= 1 || !std::io::stdin().is_terminal() {
+        if releases.len() > 1 {
+            println!("  using 1); pass --release to pick another");
+        }
+        return Ok(releases.first());
+    }
+    loop {
+        print!("Choose a release [1-{}]: ", releases.len());
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line)? == 0 {
+            bail!("no release chosen");
+        }
+        if let Ok(n @ 1..) = line.trim().parse::<usize>()
+            && let Some(r) = releases.get(n - 1)
+        {
+            return Ok(Some(r));
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod accuraterip;
 pub mod drive;
+pub mod musicbrainz;
 pub mod toc;
 pub mod wav;
 
