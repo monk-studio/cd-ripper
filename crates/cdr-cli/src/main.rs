@@ -42,6 +42,15 @@ struct Args {
     /// Jellyfin API key (Dashboard → API Keys). Prefer the environment variable.
     #[arg(long, env = "CDR_JELLYFIN_API_KEY", hide_env_values = true)]
     jellyfin_api_key: Option<String>,
+    /// Navidrome server to rescan once the album is filed, e.g. http://nas:4533.
+    #[arg(long, env = "CDR_NAVIDROME_URL", requires_all = ["navidrome_user", "navidrome_password"])]
+    navidrome_url: Option<String>,
+    /// Navidrome admin user (only admins may start scans).
+    #[arg(long, env = "CDR_NAVIDROME_USER")]
+    navidrome_user: Option<String>,
+    /// Navidrome password. Prefer the environment variable.
+    #[arg(long, env = "CDR_NAVIDROME_PASSWORD", hide_env_values = true)]
+    navidrome_password: Option<String>,
 }
 
 const SECTORS_PER_READ: u32 = 32;
@@ -220,6 +229,17 @@ fn main() -> anyhow::Result<()> {
         match cdr_core::jellyfin::Jellyfin::new(url, key).scan_music() {
             Ok(names) => println!("Jellyfin: scanning {}", names.join(", ")),
             Err(e) => eprintln!("  Jellyfin scan failed: {e}"),
+        }
+    }
+    if let (Some(url), Some(user), Some(password), false) = (
+        &args.navidrome_url,
+        &args.navidrome_user,
+        &args.navidrome_password,
+        dests.is_empty(),
+    ) {
+        match cdr_core::navidrome::Navidrome::new(url, user, password).start_scan() {
+            Ok(()) => println!("Navidrome: scanning"),
+            Err(e) => eprintln!("  Navidrome scan failed: {e}"),
         }
     }
     Ok(())

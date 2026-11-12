@@ -125,6 +125,7 @@ dependencies = [
  "claxon",
  "flacenc",
  "libc",
+ "md-5",
  "metaflac",
  "serde",
  "serde_json",
