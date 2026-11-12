@@ -36,6 +36,12 @@ struct Args {
     /// Read a folder of per-track WAVs (01.wav, ...) instead of a drive. For testing.
     #[arg(long, hide = true)]
     image: Option<PathBuf>,
+    /// Jellyfin server to rescan once the album is filed, e.g. http://nas:8096.
+    #[arg(long, env = "CDR_JELLYFIN_URL", requires = "jellyfin_api_key")]
+    jellyfin_url: Option<String>,
+    /// Jellyfin API key (Dashboard → API Keys). Prefer the environment variable.
+    #[arg(long, env = "CDR_JELLYFIN_API_KEY", hide_env_values = true)]
+    jellyfin_api_key: Option<String>,
 }
 
 const SECTORS_PER_READ: u32 = 32;
@@ -205,6 +211,16 @@ fn main() -> anyhow::Result<()> {
     std::fs::remove_dir_all(&staging).ok();
     if db.is_some() {
         println!("{accurate} of {} tracks accurately ripped", audio.len());
+    }
+
+    // The files are already in the library; a failed scan only delays them showing up.
+    if let (Some(url), Some(key), false) =
+        (&args.jellyfin_url, &args.jellyfin_api_key, dests.is_empty())
+    {
+        match cdr_core::jellyfin::Jellyfin::new(url, key).scan_music() {
+            Ok(names) => println!("Jellyfin: scanning {}", names.join(", ")),
+            Err(e) => eprintln!("  Jellyfin scan failed: {e}"),
+        }
     }
     Ok(())
 }

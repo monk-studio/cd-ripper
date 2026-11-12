@@ -12,7 +12,7 @@ anyhow = "1"
 base64 = "0.22"
 claxon = "0.4"
 flacenc = "0.5"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
 metaflac = "0.2"
 serde = { version = "1", features = ["derive"] }
