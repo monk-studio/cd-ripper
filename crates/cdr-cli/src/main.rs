@@ -2,11 +2,12 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use cdr_core::accuraterip::{self, DiscIds, Submission};
+use cdr_core::accuraterip::{self, DiscIds};
 use cdr_core::drive::CdDrive;
 use cdr_core::musicbrainz::{self, DiscToc, Release};
+use cdr_core::rip::{Ripper, TrackRip};
 use cdr_core::tags::Tags;
-use cdr_core::{SECTOR_BYTES, SECTOR_SAMPLES, coverart, flac, library};
+use cdr_core::{SECTOR_SAMPLES, coverart, flac, library};
 use clap::Parser;
 
 /// Rips an audio CD and verifies it against AccurateRip.
@@ -52,9 +53,6 @@ struct Args {
     #[arg(long, env = "CDR_NAVIDROME_PASSWORD", hide_env_values = true)]
     navidrome_password: Option<String>,
 }
-
-const SECTORS_PER_READ: u32 = 32;
-const READ_ATTEMPTS: u32 = 3;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -139,30 +137,25 @@ fn main() -> anyhow::Result<()> {
         None => println!("  disc not in the database"),
     }
 
-    let first = audio[0].1.start;
-    let end = toc.audio_end();
-    let pcm = read_range(drive.as_mut(), first, end)?;
-    let raw = accuraterip::samples(&pcm);
-    drop(pcm);
-
-    let offset = match (args.offset, &db) {
+    let mut ripper = Ripper::new(drive.as_mut(), &toc, 0);
+    ripper.offset = match (args.offset, &db) {
         (Some(o), _) => o,
-        (None, Some(subs)) => detect_offset(&raw, &toc, first, subs)
+        (None, Some(subs)) => ripper
+            .detect_offset(subs)
             .context("could not detect the read offset from AccurateRip; pass --offset")?,
         (None, None) => {
             bail!("disc not in AccurateRip, so the read offset can't be detected; pass --offset")
         }
     };
     println!(
-        "Read offset: {offset:+} samples{}",
+        "Read offset: {:+} samples{}",
+        ripper.offset,
         if args.offset.is_some() {
             ""
         } else {
             " (detected)"
         }
     );
-    let stream = accuraterip::apply_offset(&raw, offset);
-    drop(raw);
 
     // Encode locally, then copy into the library: a network share only sees finished files.
     let staging = std::env::temp_dir().join(format!("cdr-{}", std::process::id()));
@@ -188,31 +181,38 @@ fn main() -> anyhow::Result<()> {
             library::install(&staged, &folder.join(&name))?;
         }
     }
-    let mut accurate = 0;
-    for (n, &(i, t)) in audio.iter().enumerate() {
-        let from = (t.start - first) as usize * SECTOR_SAMPLES;
-        let to = (toc.track_end(i) - first) as usize * SECTOR_SAMPLES;
-        let samples = &stream[from..to];
-        let sums = accuraterip::checksums(samples, n == 0, n == audio.len() - 1);
-        let verdict = match db.as_deref().map(|subs| best_match(subs, n, sums)) {
-            Some(Some((conf, kind))) => {
-                accurate += 1;
-                format!("accurate ({kind}, confidence {conf})")
+    let (mut accurate, mut suspicious) = (0, 0);
+    for (n, &(_, t)) in audio.iter().enumerate() {
+        let show_progress = std::io::stderr().is_terminal();
+        let rip = ripper.rip_track(n, db.as_deref(), |done, total| {
+            if show_progress {
+                eprint!(
+                    "\r  track {:2}  reading {:5.1}%",
+                    t.number,
+                    done as f64 * 100.0 / total.max(1) as f64
+                );
+                std::io::stderr().flush().ok();
             }
-            Some(None) => "NOT accurate".to_string(),
-            None => "not checked".to_string(),
-        };
+        });
+        if show_progress {
+            eprint!("\r\x1b[K");
+        }
+        accurate += rip.accurate.is_some() as usize;
+        suspicious += !rip.suspicious.is_empty() as usize;
         let title = release
             .and_then(|r| r.tracks.get(n))
             .map(|m| format!("  {} — {}", m.artist, m.title))
             .unwrap_or_default();
         println!(
-            "  track {:2}  v1 {:08x}  v2 {:08x}  {verdict}{title}",
-            t.number, sums.v1, sums.v2
+            "  track {:2}  v1 {:08x}  v2 {:08x}  {}{title}",
+            t.number,
+            rip.checksums.v1,
+            rip.checksums.v2,
+            verdict(&rip, db.is_some())
         );
         if let Some(dest) = dests.get(n) {
             let staged = staging.join(format!("{:02}.flac", t.number));
-            flac::write(&staged, samples, &tags[n], cover.as_ref())?;
+            flac::write(&staged, &rip.samples, &tags[n], cover.as_ref())?;
             library::install(&staged, dest)?;
             std::fs::remove_file(&staged)?;
         }
@@ -220,6 +220,11 @@ fn main() -> anyhow::Result<()> {
     std::fs::remove_dir_all(&staging).ok();
     if db.is_some() {
         println!("{accurate} of {} tracks accurately ripped", audio.len());
+    }
+    if suspicious > 0 {
+        println!(
+            "{suspicious} track(s) with suspicious positions; listen there or try cleaning the disc"
+        );
     }
 
     // The files are already in the library; a failed scan only delays them showing up.
@@ -336,75 +341,48 @@ fn choose_release<'a>(
     }
 }
 
-/// Reads sectors `[from, to)`, retrying failed chunks and zero-filling what stays unreadable.
-fn read_range(drive: &mut dyn CdDrive, from: u32, to: u32) -> anyhow::Result<Vec<u8>> {
-    let total = to - from;
-    let mut pcm = vec![0u8; total as usize * SECTOR_BYTES];
-    let mut failed = 0;
-    let started = std::time::Instant::now();
-    for chunk_start in (from..to).step_by(SECTORS_PER_READ as usize) {
-        let count = SECTORS_PER_READ.min(to - chunk_start);
-        let at = (chunk_start - from) as usize * SECTOR_BYTES;
-        let buf = &mut pcm[at..at + count as usize * SECTOR_BYTES];
-        let mut result = Ok(());
-        for _ in 0..READ_ATTEMPTS {
-            result = drive.read_audio(chunk_start, buf);
-            if result.is_ok() {
-                break;
-            }
-        }
-        if let Err(e) = result {
-            eprintln!("\n  {e}");
-            buf.fill(0);
-            failed += count;
-        }
-        let done = chunk_start + count - from;
-        let secs = started.elapsed().as_secs_f64().max(0.001);
-        eprint!(
-            "\rReading {:5.1}%  {:4.1}x",
-            done as f64 * 100.0 / total as f64,
-            done as f64 / 75.0 / secs,
-        );
-        std::io::stderr().flush().ok();
+/// What happened to a track, in one line.
+fn verdict(r: &TrackRip, in_db: bool) -> String {
+    let mut parts = Vec::new();
+    match r.accurate {
+        Some((conf, kind)) => parts.push(format!("accurate ({kind}, confidence {conf})")),
+        None if in_db => parts.push("no AccurateRip match".to_string()),
+        None => {}
     }
-    eprintln!();
-    if failed > 0 {
-        eprintln!("  {failed} sector(s) unreadable, filled with silence");
+    if r.passes > 1 {
+        if r.suspicious.is_empty() {
+            let reread = match r.reread_sectors {
+                0 => String::new(),
+                n => format!(", {n} sector(s) re-read"),
+            };
+            parts.push(format!("secure: two reads agree{reread}"));
+        } else {
+            let at: Vec<String> = r.suspicious.iter().take(5).map(|&s| timestamp(s)).collect();
+            let more = r.suspicious.len().saturating_sub(5);
+            parts.push(format!(
+                "SUSPICIOUS at {}{}",
+                at.join(", "),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
     }
-    Ok(pcm)
+    if r.c2 == Some(true) {
+        parts.push("drive reported C2 errors".to_string());
+    }
+    parts.join("; ")
 }
 
-/// Tries each track long enough to hold the sector-450 checksum until one matches.
-fn detect_offset(
-    raw: &[u32],
-    toc: &cdr_core::toc::Toc,
-    first: u32,
-    subs: &[Submission],
-) -> Option<i32> {
-    toc.audio_tracks().enumerate().find_map(|(n, t)| {
-        let known: Vec<u32> = subs
-            .iter()
-            .filter_map(|s| s.tracks.get(n))
-            .map(|e| e.offset_crc)
-            .filter(|&c| c != 0)
-            .collect();
-        let start = (t.start - first) as usize * SECTOR_SAMPLES;
-        accuraterip::detect_offset(raw, start, &known)
-    })
-}
-
-/// Highest confidence among database entries matching either checksum version.
-fn best_match(
-    subs: &[Submission],
-    track: usize,
-    sums: accuraterip::Checksums,
-) -> Option<(u32, &'static str)> {
-    subs.iter()
-        .filter_map(|s| s.tracks.get(track))
-        .filter_map(|e| match e.crc {
-            c if c == sums.v2 => Some((e.confidence as u32, "v2")),
-            c if c == sums.v1 => Some((e.confidence as u32, "v1")),
-            _ => None,
-        })
-        .max_by_key(|&(conf, _)| conf)
+/// Track-relative position as m:ss.ff (CD frames).
+fn timestamp(sample: usize) -> String {
+    let frames = sample / SECTOR_SAMPLES;
+    format!(
+        "{}:{:02}.{:02}",
+        frames / 75 / 60,
+        frames / 75 % 60,
+        frames % 75
+    )
 }

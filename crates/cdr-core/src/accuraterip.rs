@@ -13,7 +13,7 @@ use crate::{SECTOR_SAMPLES, USER_AGENT};
 const FIRST_TRACK_SKIP: usize = 5 * SECTOR_SAMPLES - 1;
 const LAST_TRACK_SKIP: usize = 5 * SECTOR_SAMPLES;
 /// The offset-finding checksum covers one sector starting at sector 450 of a track.
-const OFFSET_CRC_START: usize = 450 * SECTOR_SAMPLES;
+pub const OFFSET_CRC_SECTOR: u32 = 450;
 /// Offsets searched by `detect_offset`, in samples either way.
 pub const OFFSET_SEARCH: i32 = 4 * SECTOR_SAMPLES as i32;
 
@@ -163,11 +163,12 @@ pub fn checksums(track: &[u32], first: bool, last: bool) -> Checksums {
     Checksums { v1, v2 }
 }
 
-/// Searches `±OFFSET_SEARCH` samples around `track_start` in an uncorrected
-/// stream for a position whose sector-450 checksum is in `known`. Returns the
-/// read offset: corrected sample `n` is `stream[n + offset]`.
-pub fn detect_offset(stream: &[u32], track_start: usize, known: &[u32]) -> Option<i32> {
-    let base = (track_start + OFFSET_CRC_START) as i64;
+/// Searches `±OFFSET_SEARCH` samples around `sector_450` — where a track's
+/// sector 450 would start if the drive had no offset — in an uncorrected
+/// stream, for a position whose checksum is in `known`. Returns the read
+/// offset: corrected sample `n` is `stream[n + offset]`.
+pub fn detect_offset(stream: &[u32], sector_450: usize, known: &[u32]) -> Option<i32> {
+    let base = sector_450 as i64;
     (-OFFSET_SEARCH..OFFSET_SEARCH).find(|&off| {
         let from = base + off as i64;
         if from < 0 || from as usize + SECTOR_SAMPLES > stream.len() {
@@ -181,6 +182,32 @@ pub fn detect_offset(stream: &[u32], track_start: usize, known: &[u32]) -> Optio
             });
         crc != 0 && known.contains(&crc)
     })
+}
+
+/// Highest confidence among database entries matching either checksum
+/// version for audio track `track` (0-based), with the version that matched.
+pub fn best_match(
+    subs: &[Submission],
+    track: usize,
+    sums: Checksums,
+) -> Option<(u32, &'static str)> {
+    subs.iter()
+        .filter_map(|s| s.tracks.get(track))
+        .filter_map(|e| match e.crc {
+            c if c == sums.v2 => Some((e.confidence as u32, "v2")),
+            c if c == sums.v1 => Some((e.confidence as u32, "v1")),
+            _ => None,
+        })
+        .max_by_key(|&(conf, _)| conf)
+}
+
+/// Sector-450 checksums the database knows for audio track `track`.
+pub fn offset_crcs(subs: &[Submission], track: usize) -> Vec<u32> {
+    subs.iter()
+        .filter_map(|s| s.tracks.get(track))
+        .map(|e| e.offset_crc)
+        .filter(|&c| c != 0)
+        .collect()
 }
 
 /// Applies a read offset, zero-filling samples the drive couldn't deliver.
@@ -200,6 +227,8 @@ pub fn apply_offset(stream: &[u32], offset: i32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OFFSET_CRC_START: usize = OFFSET_CRC_SECTOR as usize * SECTOR_SAMPLES;
     use crate::toc::Track;
 
     fn audio(number: u8, start: u32) -> Track {
@@ -287,7 +316,7 @@ mod tests {
             });
         // A drive that delivers everything 6 samples late.
         let read = apply_offset(&truth, -6);
-        let offset = detect_offset(&read, 0, &[known_crc]).unwrap();
+        let offset = detect_offset(&read, OFFSET_CRC_START, &[known_crc]).unwrap();
         assert_eq!(offset, 6);
         let fixed = apply_offset(&read, offset);
         assert_eq!(fixed[..fixed.len() - 6], truth[..truth.len() - 6]);

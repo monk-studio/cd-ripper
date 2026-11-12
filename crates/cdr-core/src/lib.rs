@@ -6,6 +6,7 @@ pub mod jellyfin;
 pub mod library;
 pub mod musicbrainz;
 pub mod navidrome;
+pub mod rip;
 pub mod tags;
 pub mod toc;
 
