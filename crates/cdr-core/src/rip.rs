@@ -18,6 +18,10 @@ use crate::{SECTOR_BYTES, SECTOR_SAMPLES};
 pub const FLUSH_SECTORS: u32 = 2048;
 /// Rounds of re-reading unsettled sectors before calling them suspicious.
 pub const REREAD_ROUNDS: u32 = 8;
+/// Rounds after which the rest are read at the drive's slowest speed:
+/// damaged spots often read cleanly when the disc turns slowly (XLD does
+/// the same).
+pub const SLOW_AFTER_ROUNDS: u32 = REREAD_ROUNDS / 2;
 const SECTORS_PER_READ: u32 = 32;
 
 pub struct Ripper<'a> {
@@ -45,6 +49,8 @@ pub struct TrackRip {
     pub suspicious: Vec<usize>,
     /// Whether the drive reported C2 errors for this read (None: no C2 support).
     pub c2: Option<bool>,
+    /// Whether some sectors had to be re-read with the drive slowed down.
+    pub slowed_down: bool,
 }
 
 /// One read of a run of sectors.
@@ -136,6 +142,7 @@ impl<'a> Ripper<'a> {
                 reread_sectors: 0,
                 suspicious: Vec::new(),
                 c2,
+                slowed_down: false,
             };
         }
 
@@ -160,16 +167,22 @@ impl<'a> Ripper<'a> {
         }
         let reread_sectors = history.len() as u32;
 
-        for _ in 0..REREAD_ROUNDS {
+        let mut slowed_down = false;
+        for round in 0..REREAD_ROUNDS {
             if history.is_empty() {
                 break;
             }
             let mut pending: Vec<usize> = history.keys().copied().collect();
             pending.sort_unstable();
+            // Flush at full speed, then slow down just for the sectors themselves.
             self.flush_cache(
                 lo + pending[0] as i64,
                 lo + *pending.last().unwrap() as i64 + 1,
             );
+            let slow = round >= SLOW_AFTER_ROUNDS;
+            if slow {
+                slowed_down |= self.drive.set_speed(Some(1)).is_ok();
+            }
             for run in runs(&pending) {
                 let reading = self.read(lo + run.start as i64, lo + run.end as i64);
                 for k in run.clone() {
@@ -185,6 +198,9 @@ impl<'a> Ripper<'a> {
                         readings.push((data.to_vec(), clean));
                     }
                 }
+            }
+            if slow {
+                let _ = self.drive.set_speed(None);
             }
         }
 
@@ -217,6 +233,7 @@ impl<'a> Ripper<'a> {
             reread_sectors,
             suspicious,
             c2,
+            slowed_down,
         }
     }
 
@@ -345,6 +362,8 @@ mod tests {
         Unstable,
         /// Every read fails.
         Unreadable,
+        /// Reads wrong, differently each time, unless the drive is at 1x.
+        NeedsSlow,
     }
 
     /// A drive with a FIFO sector cache, so re-reads without a flush return
@@ -357,6 +376,9 @@ mod tests {
         cache: VecDeque<(u32, Vec<u8>, bool)>,
         cache_size: usize,
         c2: bool,
+        /// Current speed (`None`: fastest) and every change asked for.
+        speed: Option<u16>,
+        speed_changes: Vec<Option<u16>>,
     }
 
     impl FakeDrive {
@@ -369,6 +391,8 @@ mod tests {
                 cache: VecDeque::new(),
                 cache_size: 48,
                 c2: false,
+                speed: None,
+                speed_changes: Vec::new(),
             }
         }
 
@@ -392,6 +416,7 @@ mod tests {
                 Some(Fault::BadReads(n)) if count <= *n => (garble(count * 2), true),
                 Some(Fault::StickyC2(n)) if count <= *n => (garble(0x40), true),
                 Some(Fault::Unstable) => (garble(count * 2), true),
+                Some(Fault::NeedsSlow) if self.speed != Some(1) => (garble(count * 2), true),
                 _ => (truth, false),
             };
             self.cache.push_back((lba, data.clone(), bad));
@@ -419,6 +444,12 @@ mod tests {
                 flags.push(bad);
             }
             Ok(self.c2.then_some(flags))
+        }
+
+        fn set_speed(&mut self, speed: Option<u16>) -> anyhow::Result<()> {
+            self.speed = speed;
+            self.speed_changes.push(speed);
+            Ok(())
         }
     }
 
@@ -471,6 +502,7 @@ mod tests {
             drive.physical_reads[&50], 2,
             "second pass must come from the disc"
         );
+        assert!(drive.speed_changes.is_empty());
     }
 
     #[test]
@@ -522,6 +554,10 @@ mod tests {
         assert_eq!(r.samples, truth(&pcm, 40, 80));
         assert_eq!(r.reread_sectors, 1);
         assert!(r.suspicious.is_empty());
+        assert!(
+            !r.slowed_down && drive.speed_changes.is_empty(),
+            "one re-read fixed it; no need to slow down"
+        );
     }
 
     #[test]
@@ -565,6 +601,28 @@ mod tests {
         assert_eq!(r.samples[..bad.start], expected[..bad.start]);
         assert_eq!(r.samples[bad.end..], expected[bad.end..]);
         assert_eq!(drive.physical_reads[&50], 2 + REREAD_ROUNDS);
+        assert!(r.slowed_down);
+        assert_eq!(drive.speed, None, "full speed restored");
+    }
+
+    #[test]
+    fn sector_that_only_reads_slowly_is_fixed_at_1x() {
+        let (pcm, toc) = disc();
+        let mut drive = FakeDrive::new(pcm.clone(), toc);
+        drive.faults.insert(45, Fault::NeedsSlow);
+        let r = rip(&mut drive, 1, None);
+        assert_eq!(r.samples, truth(&pcm, 40, 80));
+        assert!(r.suspicious.is_empty());
+        assert!(r.slowed_down);
+        // Slow only for the rounds after SLOW_AFTER_ROUNDS, back to full speed after each.
+        let slow_rounds = drive
+            .speed_changes
+            .iter()
+            .filter(|s| **s == Some(1))
+            .count() as u32;
+        assert_eq!(slow_rounds, 2, "two clean reads at 1x settle it");
+        assert_eq!(drive.speed, None, "full speed restored");
+        assert_eq!(drive.physical_reads[&45], 2 + SLOW_AFTER_ROUNDS + 2);
     }
 
     #[test]

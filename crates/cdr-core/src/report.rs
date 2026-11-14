@@ -55,6 +55,8 @@ pub struct TrackReport {
     pub suspicious: Vec<String>,
     /// Whether the drive reported C2 errors; `None` if it can't.
     pub c2_errors: Option<bool>,
+    /// Whether some sectors were re-read with the drive slowed down.
+    pub slowed_down: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -97,6 +99,7 @@ impl TrackReport {
                 .map(|&s| timestamp(s / SECTOR_SAMPLES))
                 .collect(),
             c2_errors: rip.c2,
+            slowed_down: rip.slowed_down,
         }
     }
 
@@ -207,7 +210,7 @@ impl RipReport {
         ));
         line(String::new());
         line(
-            "Track  Start     Length    CRC v1    CRC v2    AccurateRip     Reads  C2   Result"
+            "Track  Start     Length    CRC v1    CRC v2    AccurateRip     Reads      C2   Result"
                 .into(),
         );
         let in_db = self.accuraterip_submissions.is_some();
@@ -216,9 +219,10 @@ impl RipReport {
                 .accuraterip
                 .map(|m| format!("{} conf {}", m.version, m.confidence))
                 .unwrap_or_else(|| "-".into());
-            let reads = match t.reread_sectors {
-                0 => t.passes.to_string(),
-                n => format!("{}+{n}s", t.passes),
+            let reads = match (t.reread_sectors, t.slowed_down) {
+                (0, _) => t.passes.to_string(),
+                (n, false) => format!("{}+{n}s", t.passes),
+                (n, true) => format!("{}+{n}s slow", t.passes),
             };
             let c2 = match t.c2_errors {
                 Some(true) => "yes",
@@ -226,7 +230,7 @@ impl RipReport {
                 None => "-",
             };
             line(format!(
-                "{:5}  {}  {}  {}  {}  {:14}  {:5}  {:3}  {}",
+                "{:5}  {}  {}  {}  {}  {:14}  {:9}  {:3}  {}",
                 t.number,
                 timestamp(t.start_sector as usize),
                 timestamp(t.length_sectors as usize),
@@ -327,6 +331,7 @@ mod tests {
             reread_sectors: suspicious.len() as u32,
             suspicious,
             c2: Some(false),
+            slowed_down: false,
         }
     }
 

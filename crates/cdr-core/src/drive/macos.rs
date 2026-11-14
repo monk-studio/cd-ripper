@@ -44,6 +44,14 @@ const fn iowr(group: u8, num: u8, len: usize) -> libc::c_ulong {
 
 const DKIOCCDREAD: libc::c_ulong = iowr(b'd', 96, size_of::<DkCdRead>());
 const DKIOCCDREADTOC: libc::c_ulong = iowr(b'd', 100, size_of::<DkCdReadToc>());
+/// `_IOW('d', 99, uint16_t)` / `_IOR('d', 99, uint16_t)`: the speed in kB/s.
+const DKIOCCDSETSPEED: libc::c_ulong =
+    0x8000_0000 | ((size_of::<u16>() as libc::c_ulong) << 16) | ((b'd' as libc::c_ulong) << 8) | 99;
+const DKIOCCDGETSPEED: libc::c_ulong =
+    0x4000_0000 | ((size_of::<u16>() as libc::c_ulong) << 16) | ((b'd' as libc::c_ulong) << 8) | 99;
+/// kCDSpeedMin (1x) and kCDSpeedMax (the drive's fastest), in kB/s.
+const K_CD_SPEED_MIN: u16 = 0x00b0;
+const K_CD_SPEED_MAX: u16 = 0xffff;
 
 const K_CD_SECTOR_AREA_USER: u8 = 0x10;
 const K_CD_SECTOR_AREA_ERROR_FLAGS: u8 = 0x02;
@@ -68,6 +76,32 @@ impl MacDrive {
             model: drutil_model(),
             c2: None,
         })
+    }
+
+    fn request_speed(&self, kbps: u16) -> anyhow::Result<()> {
+        // SAFETY: DKIOCCDSETSPEED reads one uint16_t, which `kbps` is.
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), DKIOCCDSETSPEED, &kbps) };
+        if ret < 0 {
+            bail!(
+                "DKIOCCDSETSPEED failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+
+    /// The speed the drive says it is set to, in kB/s.
+    fn reported_speed(&self) -> anyhow::Result<u16> {
+        let mut kbps = 0u16;
+        // SAFETY: DKIOCCDGETSPEED writes one uint16_t into `kbps`.
+        let ret = unsafe { libc::ioctl(self.file.as_raw_fd(), DKIOCCDGETSPEED, &mut kbps) };
+        if ret < 0 {
+            bail!(
+                "DKIOCCDGETSPEED failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(kbps)
     }
 
     /// One DKIOCCDREAD of whole CD-DA sectors; `offset` is in units of the
@@ -185,6 +219,29 @@ impl CdDrive for MacDrive {
         Ok(Some(flags))
     }
 
+    /// Drives ignore speeds below their slowest (an LG BP71N takes 4x but
+    /// not 1x, and still reports 24x), so a slow request steps up through
+    /// 2x, 4x and 8x until the drive reports a lower speed than it had.
+    fn set_speed(&mut self, speed: Option<u16>) -> anyhow::Result<()> {
+        let Some(x) = speed else {
+            return self.request_speed(K_CD_SPEED_MAX);
+        };
+        let before = self.reported_speed()?;
+        let mut want = x.max(1);
+        while want <= 8.max(x) {
+            let kbps = K_CD_SPEED_MIN.saturating_mul(want);
+            self.request_speed(kbps)?;
+            if self.reported_speed()? < before {
+                return Ok(());
+            }
+            want *= 2;
+        }
+        bail!(
+            "the drive didn't slow down (it reports {}x)",
+            before / K_CD_SPEED_MIN
+        )
+    }
+
     fn model(&self) -> Option<String> {
         self.model.clone()
     }
@@ -201,5 +258,7 @@ mod tests {
         assert_eq!(size_of::<DkCdReadToc>(), 24);
         assert_eq!(DKIOCCDREAD, 0xc020_6460);
         assert_eq!(DKIOCCDREADTOC, 0xc018_6464);
+        assert_eq!(DKIOCCDSETSPEED, 0x8002_6463);
+        assert_eq!(DKIOCCDGETSPEED, 0x4002_6463);
     }
 }

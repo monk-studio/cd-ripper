@@ -318,5 +318,8 @@ fn verdict(t: &TrackReport, in_db: bool) -> String {
     if t.c2_errors == Some(true) {
         parts.push("drive reported C2 errors".to_string());
     }
+    if t.slowed_down {
+        parts.push("re-read at low speed".to_string());
+    }
     parts.join("; ")
 }

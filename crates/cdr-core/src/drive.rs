@@ -16,6 +16,14 @@ pub trait CdDrive {
         self.read_audio(lba, buf).map(|()| None)
     }
 
+    /// Sets the read speed, in multiples of audio playback (1x = 176.4 kB/s):
+    /// at most that, or the slowest the drive accepts; `None` for its fastest.
+    /// An error means the speed didn't change, as on drives without speed
+    /// control.
+    fn set_speed(&mut self, _speed: Option<u16>) -> anyhow::Result<()> {
+        anyhow::bail!("this drive can't change speed")
+    }
+
     /// "VENDOR MODEL" as reported by the drive, if known.
     fn model(&self) -> Option<String> {
         None
