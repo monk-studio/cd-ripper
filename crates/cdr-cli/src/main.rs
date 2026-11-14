@@ -1,14 +1,13 @@
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use cdr_core::accuraterip::{self, DiscIds};
+use cdr_core::accuraterip::DiscIds;
+use cdr_core::album::{self, Event};
 use cdr_core::drive::CdDrive;
+use cdr_core::library;
 use cdr_core::musicbrainz::{self, DiscToc, Release};
-use cdr_core::report::{self, RipReport, TrackReport};
-use cdr_core::rip::{Ripper, TrackRip};
-use cdr_core::tags::Tags;
-use cdr_core::{SECTOR_SAMPLES, coverart, flac, library};
+use cdr_core::report::TrackReport;
 use clap::Parser;
 
 /// Rips an audio CD and verifies it against AccurateRip.
@@ -114,24 +113,14 @@ fn main() -> anyhow::Result<()> {
         Some(r) => println!("Tagging as: {} — {}", r.artist, r.title),
         None => println!("  no MusicBrainz match; tracks stay untitled"),
     }
-    let audio: Vec<_> = toc
-        .tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.is_audio)
-        .collect();
-
     // Decide every destination before the slow read, so a clash stops us early.
-    let tags: Vec<Tags> = (0..audio.len())
-        .map(|n| Tags::for_track(release, &disc.disc_id(), n, audio.len()))
-        .collect();
-    let dests: Vec<PathBuf> = match &args.out {
-        Some(root) => tags
-            .iter()
-            .map(|t| root.join(library::track_path(&args.template, t)))
-            .collect(),
-        None => Vec::new(),
-    };
+    let (tags, dests) = album::destinations(
+        args.out.as_deref(),
+        &args.template,
+        release,
+        &disc.disc_id(),
+        toc.audio_tracks().count(),
+    );
     let existing: Vec<_> = dests.iter().filter(|p| p.exists()).collect();
     if !existing.is_empty() && !args.overwrite {
         bail!(
@@ -144,133 +133,58 @@ fn main() -> anyhow::Result<()> {
         println!("Filing into: {}", d.parent().unwrap_or(d).display());
     }
 
-    let db = accuraterip::fetch(&ids).context("querying AccurateRip")?;
-    match &db {
-        Some(subs) => println!("  {} submission(s) in the database", subs.len()),
-        None => println!("  disc not in the database"),
-    }
-
-    let mut ripper = Ripper::new(drive.as_mut(), &toc, 0);
-    ripper.always_secure = args.secure;
-    ripper.offset = match (args.offset, &db) {
-        (Some(o), _) => o,
-        (None, Some(subs)) => ripper
-            .detect_offset(subs)
-            .context("could not detect the read offset from AccurateRip; pass --offset")?,
-        (None, None) => {
-            bail!("disc not in AccurateRip, so the read offset can't be detected; pass --offset")
-        }
+    let show_progress = std::io::stderr().is_terminal();
+    let numbers: Vec<u8> = toc.audio_tracks().map(|t| t.number).collect();
+    let filing = !dests.is_empty();
+    let mut in_db = false;
+    let plan = album::Plan {
+        toc: &toc,
+        release,
+        dests: dests.clone(),
+        tags,
+        offset: args.offset,
+        secure: args.secure,
     };
-    println!(
-        "Read offset: {:+} samples{}",
-        ripper.offset,
-        if args.offset.is_some() {
-            ""
-        } else {
-            " (detected)"
+    let report = album::rip(drive.as_mut(), plan, |event| match event {
+        Event::AccurateRip(Some(n)) => {
+            in_db = true;
+            println!("  {n} submission(s) in the database");
         }
-    );
-
-    // Encode locally, then copy into the library: a network share only sees finished files.
-    let staging = std::env::temp_dir().join(format!("cdr-{}", std::process::id()));
-    std::fs::create_dir_all(&staging)?;
-    let cover = match (args.out.is_some(), release) {
-        (true, Some(r)) => fetch_cover(r),
-        _ => None,
-    };
-    if let Some(c) = &cover {
-        let name = format!(
-            "cover.{}",
-            if c.mime_type == "image/png" {
-                "png"
-            } else {
-                "jpg"
-            }
-        );
-        let staged = staging.join(&name);
-        std::fs::write(&staged, &c.data)?;
-        let mut folders: Vec<&Path> = dests.iter().filter_map(|d| d.parent()).collect();
-        folders.dedup();
-        for folder in folders {
-            library::install(&staged, &folder.join(&name))?;
-        }
-    }
-    let mut report = RipReport {
-        format: report::FORMAT,
-        tool: format!("CDR {}", env!("CARGO_PKG_VERSION")),
-        date: String::new(),
-        drive: drive_model,
-        read_offset: ripper.offset,
-        offset_detected: args.offset.is_none(),
-        secure_mode: args.secure,
-        artist: release.map(|r| r.artist.clone()),
-        album: release.map(|r| r.title.clone()),
-        musicbrainz_disc_id: disc.disc_id(),
-        musicbrainz_release_id: release.map(|r| r.id.clone()),
-        accuraterip_disc_id: ids.name(),
-        accuraterip_submissions: db.as_ref().map(Vec::len),
-        tracks: Vec::new(),
-    };
-    // The log sits with the first track; file paths in it are relative to it.
-    let log_dir = dests
-        .first()
-        .and_then(|d| d.parent())
-        .map(Path::to_path_buf);
-    for (n, &(_, t)) in audio.iter().enumerate() {
-        let show_progress = std::io::stderr().is_terminal();
-        let rip = ripper.rip_track(n, db.as_deref(), |done, total| {
+        Event::AccurateRip(None) => println!("  disc not in the database"),
+        Event::Offset { offset, detected } => println!(
+            "Read offset: {offset:+} samples{}",
+            if detected { " (detected)" } else { "" }
+        ),
+        Event::Cover(Some(c)) => println!("Cover: {} KB {}", c.data.len() / 1024, c.mime_type),
+        Event::Cover(None) if filing => println!("  no cover found"),
+        Event::Cover(None) => {}
+        Event::Progress { track, done, total } => {
             if show_progress {
                 eprint!(
                     "\r  track {:2}  reading {:5.1}%",
-                    t.number,
+                    numbers[track],
                     done as f64 * 100.0 / total.max(1) as f64
                 );
                 std::io::stderr().flush().ok();
             }
-        });
-        if show_progress {
-            eprint!("\r\x1b[K");
         }
-        let mut entry = TrackReport::new(t.number, t.start, &rip);
-        if let Some(m) = release.and_then(|r| r.tracks.get(n)) {
-            entry.title = Some(m.title.clone());
-            entry.artist = Some(m.artist.clone());
+        Event::TrackDone { report: t, .. } => {
+            if show_progress {
+                eprint!("\r\x1b[K");
+            }
+            let title = match (&t.artist, &t.title) {
+                (Some(a), Some(title)) => format!("  {a} — {title}"),
+                _ => String::new(),
+            };
+            println!(
+                "  track {:2}  v1 {}  v2 {}  {}{title}",
+                t.number,
+                t.crc_v1,
+                t.crc_v2,
+                verdict(&t, in_db)
+            );
         }
-        entry.file = dests.get(n).map(|d| {
-            let rel = log_dir.as_deref().and_then(|l| d.strip_prefix(l).ok());
-            rel.unwrap_or(d).to_string_lossy().into_owned()
-        });
-        report.tracks.push(entry);
-        let title = release
-            .and_then(|r| r.tracks.get(n))
-            .map(|m| format!("  {} — {}", m.artist, m.title))
-            .unwrap_or_default();
-        println!(
-            "  track {:2}  v1 {:08x}  v2 {:08x}  {}{title}",
-            t.number,
-            rip.checksums.v1,
-            rip.checksums.v2,
-            verdict(&rip, db.is_some())
-        );
-        if let Some(dest) = dests.get(n) {
-            let staged = staging.join(format!("{:02}.flac", t.number));
-            flac::write(&staged, &rip.samples, &tags[n], cover.as_ref())?;
-            library::install(&staged, dest)?;
-            std::fs::remove_file(&staged)?;
-        }
-    }
-    report.date = report::rfc3339(std::time::SystemTime::now());
-    if let Some(dir) = &log_dir {
-        for (name, body) in [
-            ("rip.log", report.to_text()),
-            ("rip.json", report.to_json()),
-        ] {
-            let staged = staging.join(name);
-            std::fs::write(&staged, body)?;
-            library::install(&staged, &dir.join(name))?;
-        }
-    }
-    std::fs::remove_dir_all(&staging).ok();
+    })?;
     println!("Result: {}", report.verdict().1);
 
     // The files are already in the library; a failed scan only delays them showing up.
@@ -311,24 +225,6 @@ fn open_drive(device: Option<&str>) -> anyhow::Result<Box<dyn CdDrive>> {
     {
         let _ = device;
         bail!("no drive backend for this platform yet")
-    }
-}
-
-/// Fetches the front cover. Failures only warn: a rip without art is still a rip.
-fn fetch_cover(release: &Release) -> Option<coverart::Cover> {
-    match coverart::fetch(release) {
-        Ok(Some(cover)) => {
-            println!("Cover: {} KB {}", cover.data.len() / 1024, cover.mime_type);
-            Some(cover)
-        }
-        Ok(None) => {
-            println!("  no cover in the Cover Art Archive");
-            None
-        }
-        Err(e) => {
-            eprintln!("  cover download failed: {e}");
-            None
-        }
     }
 }
 
@@ -388,23 +284,26 @@ fn choose_release<'a>(
 }
 
 /// What happened to a track, in one line.
-fn verdict(r: &TrackRip, in_db: bool) -> String {
+fn verdict(t: &TrackReport, in_db: bool) -> String {
     let mut parts = Vec::new();
-    match r.accurate {
-        Some((conf, kind)) => parts.push(format!("accurate ({kind}, confidence {conf})")),
+    match t.accuraterip {
+        Some(m) => parts.push(format!(
+            "accurate ({}, confidence {})",
+            m.version, m.confidence
+        )),
         None if in_db => parts.push("no AccurateRip match".to_string()),
         None => {}
     }
-    if r.passes > 1 {
-        if r.suspicious.is_empty() {
-            let reread = match r.reread_sectors {
+    if t.passes > 1 {
+        if t.suspicious.is_empty() {
+            let reread = match t.reread_sectors {
                 0 => String::new(),
                 n => format!(", {n} sector(s) re-read"),
             };
             parts.push(format!("secure: two reads agree{reread}"));
         } else {
-            let at: Vec<String> = r.suspicious.iter().take(5).map(|&s| timestamp(s)).collect();
-            let more = r.suspicious.len().saturating_sub(5);
+            let at: Vec<&str> = t.suspicious.iter().take(5).map(|s| s.trim()).collect();
+            let more = t.suspicious.len().saturating_sub(5);
             parts.push(format!(
                 "SUSPICIOUS at {}{}",
                 at.join(", "),
@@ -416,19 +315,8 @@ fn verdict(r: &TrackRip, in_db: bool) -> String {
             ));
         }
     }
-    if r.c2 == Some(true) {
+    if t.c2_errors == Some(true) {
         parts.push("drive reported C2 errors".to_string());
     }
     parts.join("; ")
-}
-
-/// Track-relative position as m:ss.ff (CD frames).
-fn timestamp(sample: usize) -> String {
-    let frames = sample / SECTOR_SAMPLES;
-    format!(
-        "{}:{:02}.{:02}",
-        frames / 75 / 60,
-        frames / 75 % 60,
-        frames % 75
-    )
 }

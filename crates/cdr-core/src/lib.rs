@@ -1,4 +1,5 @@
 pub mod accuraterip;
+pub mod album;
 pub mod coverart;
 pub mod drive;
 pub mod flac;
