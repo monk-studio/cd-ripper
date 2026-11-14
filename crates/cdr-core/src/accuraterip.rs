@@ -54,16 +54,21 @@ impl DiscIds {
         }
     }
 
+    /// The disc's name in the database, e.g. `012-00121bef-00ac3084-a009cb0c`.
+    pub fn name(&self) -> String {
+        format!(
+            "{:03}-{:08x}-{:08x}-{:08x}",
+            self.audio_tracks, self.id1, self.id2, self.cddb
+        )
+    }
+
     pub fn url(&self) -> String {
         format!(
-            "http://www.accuraterip.com/accuraterip/{:x}/{:x}/{:x}/dBAR-{:03}-{:08x}-{:08x}-{:08x}.bin",
+            "http://www.accuraterip.com/accuraterip/{:x}/{:x}/{:x}/dBAR-{}.bin",
             self.id1 & 0xf,
             self.id1 >> 4 & 0xf,
             self.id1 >> 8 & 0xf,
-            self.audio_tracks,
-            self.id1,
-            self.id2,
-            self.cddb,
+            self.name(),
         )
     }
 }

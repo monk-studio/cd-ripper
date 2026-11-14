@@ -5,6 +5,7 @@ use anyhow::{Context, bail};
 use cdr_core::accuraterip::{self, DiscIds};
 use cdr_core::drive::CdDrive;
 use cdr_core::musicbrainz::{self, DiscToc, Release};
+use cdr_core::report::{self, RipReport, TrackReport};
 use cdr_core::rip::{Ripper, TrackRip};
 use cdr_core::tags::Tags;
 use cdr_core::{SECTOR_SAMPLES, coverart, flac, library};
@@ -63,7 +64,8 @@ fn main() -> anyhow::Result<()> {
         Some(dir) => Box::new(cdr_core::drive::image::ImageDrive::open(dir)?),
         None => open_drive(args.device.as_deref())?,
     };
-    if let Some(model) = drive.model() {
+    let drive_model = drive.model();
+    if let Some(model) = &drive_model {
         println!("Drive: {model}");
     }
 
@@ -193,7 +195,27 @@ fn main() -> anyhow::Result<()> {
             library::install(&staged, &folder.join(&name))?;
         }
     }
-    let (mut accurate, mut suspicious) = (0, 0);
+    let mut report = RipReport {
+        format: report::FORMAT,
+        tool: format!("CDR {}", env!("CARGO_PKG_VERSION")),
+        date: String::new(),
+        drive: drive_model,
+        read_offset: ripper.offset,
+        offset_detected: args.offset.is_none(),
+        secure_mode: args.secure,
+        artist: release.map(|r| r.artist.clone()),
+        album: release.map(|r| r.title.clone()),
+        musicbrainz_disc_id: disc.disc_id(),
+        musicbrainz_release_id: release.map(|r| r.id.clone()),
+        accuraterip_disc_id: ids.name(),
+        accuraterip_submissions: db.as_ref().map(Vec::len),
+        tracks: Vec::new(),
+    };
+    // The log sits with the first track; file paths in it are relative to it.
+    let log_dir = dests
+        .first()
+        .and_then(|d| d.parent())
+        .map(Path::to_path_buf);
     for (n, &(_, t)) in audio.iter().enumerate() {
         let show_progress = std::io::stderr().is_terminal();
         let rip = ripper.rip_track(n, db.as_deref(), |done, total| {
@@ -209,8 +231,16 @@ fn main() -> anyhow::Result<()> {
         if show_progress {
             eprint!("\r\x1b[K");
         }
-        accurate += rip.accurate.is_some() as usize;
-        suspicious += !rip.suspicious.is_empty() as usize;
+        let mut entry = TrackReport::new(t.number, t.start, &rip);
+        if let Some(m) = release.and_then(|r| r.tracks.get(n)) {
+            entry.title = Some(m.title.clone());
+            entry.artist = Some(m.artist.clone());
+        }
+        entry.file = dests.get(n).map(|d| {
+            let rel = log_dir.as_deref().and_then(|l| d.strip_prefix(l).ok());
+            rel.unwrap_or(d).to_string_lossy().into_owned()
+        });
+        report.tracks.push(entry);
         let title = release
             .and_then(|r| r.tracks.get(n))
             .map(|m| format!("  {} — {}", m.artist, m.title))
@@ -229,15 +259,19 @@ fn main() -> anyhow::Result<()> {
             std::fs::remove_file(&staged)?;
         }
     }
+    report.date = report::rfc3339(std::time::SystemTime::now());
+    if let Some(dir) = &log_dir {
+        for (name, body) in [
+            ("rip.log", report.to_text()),
+            ("rip.json", report.to_json()),
+        ] {
+            let staged = staging.join(name);
+            std::fs::write(&staged, body)?;
+            library::install(&staged, &dir.join(name))?;
+        }
+    }
     std::fs::remove_dir_all(&staging).ok();
-    if db.is_some() {
-        println!("{accurate} of {} tracks accurately ripped", audio.len());
-    }
-    if suspicious > 0 {
-        println!(
-            "{suspicious} track(s) with suspicious positions; listen there or try cleaning the disc"
-        );
-    }
+    println!("Result: {}", report.verdict().1);
 
     // The files are already in the library; a failed scan only delays them showing up.
     if let (Some(url), Some(key), false) =
