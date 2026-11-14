@@ -1,5 +1,11 @@
 # CDR
 
+## Behaviour spec
+
+`docs/spec.md` says what the ripper does and why: reading, verification,
+offset, verdicts, output, logs, external services, known limitations. Read it
+before changing behaviour, and update it in the same commit when you do.
+
 ## Reference sources
 
 Other rippers' source, for studying how they solve the same problems. Read
