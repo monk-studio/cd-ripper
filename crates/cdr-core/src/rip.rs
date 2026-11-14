@@ -26,6 +26,8 @@ pub struct Ripper<'a> {
     /// Read offset in samples: corrected sample `n` is raw sample `n + offset`.
     pub offset: i32,
     pub flush_sectors: u32,
+    /// Read every track twice, even when AccurateRip confirms the first read.
+    pub always_secure: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +62,7 @@ impl<'a> Ripper<'a> {
             toc,
             offset,
             flush_sectors: FLUSH_SECTORS,
+            always_secure: false,
         }
     }
 
@@ -123,7 +126,7 @@ impl<'a> Ripper<'a> {
         let c2 = first_pass
             .c2_supported
             .then(|| first_pass.bad.iter().any(|&b| b));
-        if accurate.is_some() {
+        if accurate.is_some() && !self.always_secure {
             progress(count * 2, count * 2);
             return TrackRip {
                 samples,
@@ -487,6 +490,27 @@ mod tests {
         assert_eq!(r.accurate, Some((7, "v2")));
         assert_eq!(r.passes, 1);
         assert_eq!(drive.physical_reads[&50], 1);
+    }
+
+    #[test]
+    fn always_secure_reads_twice_even_when_accurate() {
+        let (pcm, toc) = disc();
+        let sums = accuraterip::checksums(&truth(&pcm, 40, 80), false, false);
+        let entry = |crc| TrackEntry {
+            confidence: 7,
+            crc,
+            offset_crc: 0,
+        };
+        let db = [Submission {
+            tracks: vec![entry(0), entry(sums.v2), entry(0), entry(0)],
+        }];
+        let mut drive = FakeDrive::new(pcm, toc.clone());
+        let mut ripper = Ripper::new(&mut drive, &toc, 0);
+        ripper.flush_sectors = 64;
+        ripper.always_secure = true;
+        let r = ripper.rip_track(1, Some(&db), |_, _| {});
+        assert_eq!((r.accurate, r.passes), (Some((7, "v2")), 2));
+        assert!(r.suspicious.is_empty());
     }
 
     #[test]

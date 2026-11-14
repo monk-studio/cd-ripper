@@ -16,6 +16,9 @@ use crate::toc::Toc;
 const API: &str = "https://musicbrainz.org/ws/2";
 /// Sector addresses in disc IDs count the 2s (150 sector) lead-in.
 const LEAD_IN: u32 = 150;
+/// MusicBrainz answers 503 when a client exceeds its rate limit or the
+/// service is busy; it asks clients to back off and try again.
+const ATTEMPTS: u32 = 4;
 
 /// The audio session of a disc, as MusicBrainz sees it: audio tracks only,
 /// ending before the data session on an enhanced CD.
@@ -106,10 +109,17 @@ pub fn lookup(disc: &DiscToc) -> anyhow::Result<Vec<Release>> {
         "{API}/discid/{id}?toc={}&inc=artist-credits+recordings+labels+release-groups&fmt=json",
         disc.toc_param()
     );
-    let resp = match ureq::get(&url).set("User-Agent", USER_AGENT).call() {
-        Ok(resp) => resp,
-        Err(ureq::Error::Status(404, _)) => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
+    let mut attempt = 1;
+    let resp = loop {
+        match ureq::get(&url).set("User-Agent", USER_AGENT).call() {
+            Ok(resp) => break resp,
+            Err(ureq::Error::Status(404, _)) => return Ok(Vec::new()),
+            Err(ureq::Error::Status(503, _)) if attempt < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt)));
+                attempt += 1;
+            }
+            Err(e) => return Err(e.into()),
+        }
     };
     let body: api::DiscResponse = serde_json::from_reader(resp.into_reader())?;
     Ok(releases(body, &id, disc.offsets.len()))

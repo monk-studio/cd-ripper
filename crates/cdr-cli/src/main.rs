@@ -34,6 +34,9 @@ struct Args {
     /// Only print the TOC, disc IDs and matching releases.
     #[arg(long)]
     toc_only: bool,
+    /// Read every track twice, even when AccurateRip confirms the first read.
+    #[arg(long)]
+    secure: bool,
     /// Read a folder of per-track WAVs (01.wav, ...) instead of a drive. For testing.
     #[arg(long, hide = true)]
     image: Option<PathBuf>,
@@ -86,10 +89,18 @@ fn main() -> anyhow::Result<()> {
 
     let disc = DiscToc::from_toc(&toc);
     println!("MusicBrainz: {}", disc.disc_id());
-    let releases = musicbrainz::lookup(&disc).unwrap_or_else(|e| {
-        eprintln!("  MusicBrainz lookup failed: {e}");
-        Vec::new()
-    });
+    // A failed lookup isn't "unknown disc": filing it untagged would put an
+    // anonymous album in the library because of a passing server hiccup.
+    let releases = match musicbrainz::lookup(&disc) {
+        Ok(r) => r,
+        Err(e) if args.out.is_some() => {
+            bail!("MusicBrainz lookup failed ({e}); try again in a minute")
+        }
+        Err(e) => {
+            eprintln!("  MusicBrainz lookup failed: {e}");
+            Vec::new()
+        }
+    };
     for (i, r) in releases.iter().enumerate() {
         println!("  {}) {}", i + 1, describe(r));
     }
@@ -138,6 +149,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut ripper = Ripper::new(drive.as_mut(), &toc, 0);
+    ripper.always_secure = args.secure;
     ripper.offset = match (args.offset, &db) {
         (Some(o), _) => o,
         (None, Some(subs)) => ripper
