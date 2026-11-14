@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/cdr-core", "crates/cdr-cli"]
+# Built by `nsh` as its own workspace; see its Cargo.toml.
+exclude = ["crates/cdr-app"]
 
 [workspace.package]
 edition = "2024"

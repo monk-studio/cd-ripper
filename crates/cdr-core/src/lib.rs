@@ -23,3 +23,9 @@ pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://monk-studio.com)"
 );
+
+/// Names of the settings the apps remember between runs.
+pub mod storage_keys {
+    /// The music library folder rips are filed into.
+    pub const LIBRARY: &str = "library";
+}
