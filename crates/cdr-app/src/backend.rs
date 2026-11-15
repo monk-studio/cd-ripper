@@ -43,6 +43,19 @@ pub trait Backend: Send + Sync {
 
     /// Ejects `disc` from its drive. Blocking.
     fn eject(&self, disc: &Disc) -> anyhow::Result<()>;
+
+    /// The app the system opens when a music CD goes in, if any. It reads the
+    /// disc at the same time as CDR and slows ripping down. Blocking.
+    fn app_opened_on_insert(&self) -> Option<String>;
+}
+
+/// Whether `e` is the system refusing access to the disc (on macOS, until the
+/// user allows access to removable volumes).
+pub fn is_access_denied(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    })
 }
 
 /// The drive, MusicBrainz and AccurateRip.
@@ -96,6 +109,30 @@ impl Backend for Real {
         #[cfg(not(target_os = "macos"))]
         anyhow::bail!("can't eject {} on this platform yet", disc.device)
     }
+
+    fn app_opened_on_insert(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            // System Settings › CDs & DVDs › "When you insert a music CD".
+            // Unset means the default, which opens Music; action 1 is Ignore.
+            let out = std::process::Command::new("defaults")
+                .args([
+                    "read",
+                    "com.apple.digihub",
+                    "com.apple.digihub.cd.music.appeared",
+                ])
+                .output()
+                .ok()?;
+            let action = digihub_action(&String::from_utf8_lossy(&out.stdout));
+            match action {
+                Some(1) => None,
+                Some(100 | 101) | None => Some("the Music app".into()),
+                Some(_) => Some("another app".into()),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
 }
 
 static BACKEND: Mutex<Option<Arc<dyn Backend>>> = Mutex::new(None);
@@ -125,4 +162,23 @@ fn open_drive(device: &str) -> anyhow::Result<Box<dyn CdDrive>> {
     return Ok(Box::new(cdr_core::drive::macos::MacDrive::open(device)?));
     #[cfg(not(target_os = "macos"))]
     anyhow::bail!("no drive backend for {device} on this platform yet")
+}
+
+/// The `action` in `defaults read com.apple.digihub
+/// com.apple.digihub.cd.music.appeared`, which prints `{\n    action = 101;\n}`.
+fn digihub_action(text: &str) -> Option<u32> {
+    let rest = text.split("action =").nth(1)?;
+    rest.split(';').next()?.trim().parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_digihub_action() {
+        assert_eq!(digihub_action("{\n    action = 101;\n}\n"), Some(101));
+        assert_eq!(digihub_action("{\n    action = 1;\n}\n"), Some(1));
+        assert_eq!(digihub_action(""), None, "unset: the system default");
+    }
 }

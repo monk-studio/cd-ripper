@@ -72,12 +72,24 @@ fn disc() -> Disc {
 struct Fake {
     ejected: AtomicBool,
     secure: AtomicBool,
+    /// The system refuses access to the disc.
+    denied: AtomicBool,
+    /// What the system opens on insert.
+    auto_open: Mutex<Option<String>>,
 }
 
 impl Backend for Fake {
     fn read_disc(&self) -> anyhow::Result<Disc> {
+        if self.denied.load(Ordering::SeqCst) {
+            let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+            return Err(anyhow::Error::new(denied).context("opening /dev/rdisk9"));
+        }
         anyhow::ensure!(!self.ejected.load(Ordering::SeqCst), "no disc");
         Ok(disc())
+    }
+
+    fn app_opened_on_insert(&self) -> Option<String> {
+        self.auto_open.lock().unwrap().clone()
     }
 
     fn eject(&self, _disc: &Disc) -> anyhow::Result<()> {
@@ -244,5 +256,34 @@ fn eject_after_ripping_waits_for_the_next_disc() {
     // The disc is gone: across a disc poll (every 2 s) the app stays put.
     app.wait(std::time::Duration::from_secs(3)).unwrap();
     assert!(!app.shows("12 hugs (like butterflies)"));
+    assert!(app.shows("Insert an audio CD"));
+}
+
+#[test]
+fn warns_while_music_opens_on_insert_until_fixed() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    *fake.auto_open.lock().unwrap() = Some("the Music app".into());
+    let mut app = start_with(fake.clone(), &[]);
+    app.wait_for("text:/macOS opens the Music app when you insert a CD/")
+        .unwrap();
+    // The user changes the setting, then checks again.
+    *fake.auto_open.lock().unwrap() = None;
+    app.press("text:Check again").unwrap();
+    app.wait_for_gone(
+        "text:/macOS opens the Music app/",
+        std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+#[test]
+fn says_when_the_system_refuses_access_to_the_disc() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    fake.denied.store(true, Ordering::SeqCst);
+    let mut app = start_with(fake, &[]);
+    app.wait_for("text:/CDR isn't allowed to read discs/")
+        .unwrap();
     assert!(app.shows("Insert an audio CD"));
 }

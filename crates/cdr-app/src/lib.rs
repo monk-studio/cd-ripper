@@ -8,7 +8,7 @@ pub mod backend;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use backend::{Disc, RipRequest, backend};
+use backend::{Disc, RipRequest, backend, is_access_denied};
 use cdr_core::album::{self, Event};
 use cdr_core::library::DEFAULT_TEMPLATE;
 use cdr_core::musicbrainz::{DiscToc, Release};
@@ -52,6 +52,9 @@ pub fn App() -> impl IntoElement {
     let chosen = signal(0_usize);
     let library = signal(Storage::get_item(storage_keys::LIBRARY));
     let secure = signal(Storage::get_item(storage_keys::SECURE).as_deref() == Some("1"));
+    // Another app the system opens on insert, which would read the disc too.
+    let auto_open = signal(None::<String>);
+    let access_denied = signal(false);
     let rows = signal(Vec::<Row>::new());
     let message = signal(None::<String>);
     // Tasks live as long as the UI they were started in. Handlers run inside
@@ -59,16 +62,33 @@ pub fn App() -> impl IntoElement {
     // tasks they start belong to the app instead.
     let app = Owner::current();
 
+    let check_auto_open = move || {
+        spawn(async move {
+            auto_open.set(
+                blocking(|| backend().app_opened_on_insert())
+                    .await
+                    .ok()
+                    .flatten(),
+            );
+        });
+    };
+    check_auto_open();
+
     // Look for a disc every two seconds while there is none.
     spawn(async move {
         loop {
-            if phase.get() == Phase::NoDisc
-                && let Ok(Ok(found)) = blocking(|| backend().read_disc()).await
-            {
-                rows.set(rows_for(&found, found.releases.first()));
-                chosen.set(0);
-                disc.set(Some(found));
-                phase.set(Phase::Ready);
+            if phase.get() == Phase::NoDisc {
+                match blocking(|| backend().read_disc()).await {
+                    Ok(Ok(found)) => {
+                        access_denied.set(false);
+                        rows.set(rows_for(&found, found.releases.first()));
+                        chosen.set(0);
+                        disc.set(Some(found));
+                        phase.set(Phase::Ready);
+                    }
+                    Ok(Err(e)) => access_denied.set(is_access_denied(&e)),
+                    Err(_) => {}
+                }
             }
             timer(Duration::from_secs(2)).await;
         }
@@ -210,6 +230,7 @@ pub fn App() -> impl IntoElement {
         .flex_1()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
+        .child(auto_open_notice(auto_open, move || app.run(check_auto_open)))
         .child(
             when(move || phase.get() == Phase::NoDisc, move || {
                 view()
@@ -220,6 +241,11 @@ pub fn App() -> impl IntoElement {
                     .child(text("Insert an audio CD").text_2xl().font_weight(FontWeight::SEMIBOLD))
                     .child(text("CDR reads it, checks every track against AccurateRip and files it into your library.")
                         .text_color(move || theme().muted_foreground))
+                    .child(when(move || access_denied.get(), move || {
+                        text("CDR isn't allowed to read discs. Allow it in System Settings › Privacy & Security › Files & Folders › CDR › Removable Volumes.")
+                            .text_center()
+                            .text_color(move || theme().destructive)
+                    }))
             })
             .otherwise(move || {
                 view()
@@ -487,6 +513,40 @@ fn footer(
                     }
                 })),
         )
+}
+
+/// Shown while the system opens another app on insert: it would read the
+/// disc at the same time and slow ripping down.
+fn auto_open_notice(
+    auto_open: Signal<Option<String>>,
+    check_again: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    when(
+        move || auto_open.get().is_some(),
+        move || {
+            view()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .mx_6()
+            .mt_4()
+            .p_3()
+            .rounded(move || theme().radius)
+            .bg(move || theme().muted)
+            .child(
+                text(move || {
+                    format!(
+                        "macOS opens {} when you insert a CD, and it reads the disc at the same time as CDR. \
+                         In System Settings › CDs & DVDs, set “When you insert a music CD” to Ignore.",
+                        auto_open.get().unwrap_or_default()
+                    )
+                })
+                .flex_1()
+                .text_sm(),
+            )
+            .child(secondary_button("Check again", || false, check_again.clone()))
+        },
+    )
 }
 
 /// A setting that is on or off: a box that shows a tick, and its label.
