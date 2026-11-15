@@ -27,8 +27,13 @@ const SECTORS_PER_READ: u32 = 32;
 pub struct Ripper<'a> {
     drive: &'a mut dyn CdDrive,
     toc: &'a Toc,
-    /// Read offset in samples: corrected sample `n` is raw sample `n + offset`.
+    /// The drive's read offset in samples: corrected sample `n` is raw
+    /// sample `n + offset`. Output always uses it.
     pub offset: i32,
+    /// Offsets at which this disc matched other pressings in AccurateRip.
+    /// Only for checking: a track that matches at one of them is accurate,
+    /// but its audio stays aligned to the drive offset.
+    pub pressing_offsets: Vec<i32>,
     pub flush_sectors: u32,
     /// Read every track twice, even when AccurateRip confirms the first read.
     pub always_secure: bool,
@@ -40,6 +45,8 @@ pub struct TrackRip {
     pub checksums: Checksums,
     /// AccurateRip confidence and checksum version, if it matched.
     pub accurate: Option<(u32, &'static str)>,
+    /// When it matched another pressing: the offset that pressing lines up at.
+    pub pressing_offset: Option<i32>,
     /// Full reads of the track: 1 when AccurateRip matched the first, else 2.
     pub passes: u32,
     /// Sectors that needed re-reading after the full passes.
@@ -67,6 +74,7 @@ impl<'a> Ripper<'a> {
             drive,
             toc,
             offset,
+            pressing_offsets: Vec::new(),
             flush_sectors: FLUSH_SECTORS,
             always_secure: false,
         }
@@ -111,24 +119,52 @@ impl<'a> Ripper<'a> {
         let start = self.toc.tracks[i].start as i64 * SECTOR_SAMPLES as i64;
         let len = (self.toc.track_end(i) - self.toc.tracks[i].start) as usize * SECTOR_SAMPLES;
         let raw_start = start + self.offset as i64;
-        let lo = raw_start.div_euclid(SECTOR_SAMPLES as i64);
-        let hi =
-            (raw_start + len as i64 + SECTOR_SAMPLES as i64 - 1).div_euclid(SECTOR_SAMPLES as i64);
+        // Extra sectors either side, so other pressings' alignments can be checked too.
+        let reach = self
+            .pressing_offsets
+            .iter()
+            .map(|p| (p - self.offset).unsigned_abs())
+            .max();
+        let margin = reach.unwrap_or(0).div_ceil(SECTOR_SAMPLES as u32) as i64;
+        let lo = raw_start.div_euclid(SECTOR_SAMPLES as i64) - margin;
+        let hi = (raw_start + len as i64 + SECTOR_SAMPLES as i64 - 1)
+            .div_euclid(SECTOR_SAMPLES as i64)
+            + margin;
         let count = (hi - lo) as u32;
         let skip = (raw_start - lo * SECTOR_SAMPLES as i64) as usize;
 
-        let extract = |pcm: &[u8]| accuraterip::samples(&pcm[skip * 4..(skip + len) * 4]);
-        let verify = |samples: &[u32]| {
-            let sums = accuraterip::checksums(samples, first, last);
-            (
-                sums,
-                db.and_then(|subs| accuraterip::best_match(subs, n, sums)),
-            )
+        let extract_at = |pcm: &[u8], shift: i64| {
+            let from = (skip as i64 + shift) as usize;
+            accuraterip::samples(&pcm[from * 4..(from + len) * 4])
+        };
+        let extract = |pcm: &[u8]| extract_at(pcm, 0);
+        let pressings = self.pressing_offsets.clone();
+        let drive_offset = self.offset;
+        // Checksums of the output (drive offset); a match there, else at another pressing's alignment.
+        let verify_pcm = |pcm: &[u8]| {
+            let sums = accuraterip::checksums(&extract(pcm), first, last);
+            let Some(subs) = db else {
+                return (sums, None, None);
+            };
+            if let Some(m) = accuraterip::best_match(subs, n, sums) {
+                return (sums, Some(m), None);
+            }
+            for &p in &pressings {
+                let alt = accuraterip::checksums(
+                    &extract_at(pcm, (p - drive_offset) as i64),
+                    first,
+                    last,
+                );
+                if let Some(m) = accuraterip::best_match(subs, n, alt) {
+                    return (sums, Some(m), Some(p));
+                }
+            }
+            (sums, None, None)
         };
 
         let first_pass = self.read_reporting(lo, hi, |d| progress(d, count * 2));
         let samples = extract(&first_pass.pcm);
-        let (checksums, accurate) = verify(&samples);
+        let (checksums, accurate, pressing_offset) = verify_pcm(&first_pass.pcm);
         let c2 = first_pass
             .c2_supported
             .then(|| first_pass.bad.iter().any(|&b| b));
@@ -138,6 +174,7 @@ impl<'a> Ripper<'a> {
                 samples,
                 checksums,
                 accurate,
+                pressing_offset,
                 passes: 1,
                 reread_sectors: 0,
                 suspicious: Vec::new(),
@@ -222,13 +259,14 @@ impl<'a> Ripper<'a> {
         suspicious.dedup();
 
         let samples = extract(&pcm);
-        let (checksums, accurate) = verify(&samples);
+        let (checksums, accurate, pressing_offset) = verify_pcm(&pcm);
         let c2 = (first_pass.c2_supported || second_pass.c2_supported)
             .then(|| first_pass.bad.iter().chain(&second_pass.bad).any(|&b| b));
         TrackRip {
             samples,
             checksums,
             accurate,
+            pressing_offset,
             passes: 2,
             reread_sectors,
             suspicious,
@@ -543,6 +581,47 @@ mod tests {
         let r = ripper.rip_track(1, Some(&db), |_, _| {});
         assert_eq!((r.accurate, r.passes), (Some((7, "v2")), 2));
         assert!(r.suspicious.is_empty());
+    }
+
+    #[test]
+    fn other_pressing_is_accurate_but_audio_keeps_the_drive_offset() {
+        // AccurateRip's pressing lines up 42 samples later than this disc.
+        let (pcm, toc) = disc();
+        let all = accuraterip::samples(&pcm);
+        let at = 40 * SECTOR_SAMPLES + 42;
+        let theirs = accuraterip::checksums(&all[at..at + 40 * SECTOR_SAMPLES], false, false);
+        let entry = |crc| TrackEntry {
+            confidence: 9,
+            crc,
+            offset_crc: 0,
+        };
+        let db = [Submission {
+            tracks: vec![entry(0), entry(theirs.v2), entry(0), entry(0)],
+        }];
+
+        let mut drive = FakeDrive::new(pcm.clone(), toc.clone());
+        let mut ripper = Ripper::new(&mut drive, &toc, 0);
+        ripper.flush_sectors = 64;
+        ripper.pressing_offsets = vec![42];
+        let r = ripper.rip_track(1, Some(&db), |_, _| {});
+        assert_eq!(r.accurate, Some((9, "v2")));
+        assert_eq!(r.pressing_offset, Some(42));
+        assert_eq!(
+            r.passes, 1,
+            "a match at another pressing needs no second read"
+        );
+        assert_eq!(
+            r.samples,
+            truth(&pcm, 40, 80),
+            "audio stays at the drive offset"
+        );
+
+        // Without knowing about that pressing, the track isn't confirmed.
+        let mut drive = FakeDrive::new(pcm.clone(), toc.clone());
+        let mut ripper = Ripper::new(&mut drive, &toc, 0);
+        ripper.flush_sectors = 64;
+        let r = ripper.rip_track(1, Some(&db), |_, _| {});
+        assert_eq!((r.accurate, r.passes), (None, 2));
     }
 
     #[test]

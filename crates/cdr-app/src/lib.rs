@@ -119,6 +119,7 @@ pub fn App() -> impl IntoElement {
                 tags,
                 offset: None,
                 secure: false,
+                data_dir: cdr_core::offsets::data_dir(),
             };
             album::rip(drive.as_mut(), plan, |event| {
                 let _ = tx.send(event);

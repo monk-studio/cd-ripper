@@ -89,9 +89,7 @@ impl CdDrive for ImageDrive {
         Ok(())
     }
 
-    fn model(&self) -> Option<String> {
-        Some("disc image".into())
-    }
+    // No model: an image isn't a drive, so it has no offset to remember or look up.
 }
 
 #[cfg(test)]

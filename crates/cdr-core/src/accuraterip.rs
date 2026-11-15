@@ -170,23 +170,35 @@ pub fn checksums(track: &[u32], first: bool, last: bool) -> Checksums {
 
 /// Searches `±OFFSET_SEARCH` samples around `sector_450` — where a track's
 /// sector 450 would start if the drive had no offset — in an uncorrected
-/// stream, for a position whose checksum is in `known`. Returns the read
-/// offset: corrected sample `n` is `stream[n + offset]`.
-pub fn detect_offset(stream: &[u32], sector_450: usize, known: &[u32]) -> Option<i32> {
+/// stream, for positions whose checksum is among `known` (checksum,
+/// confidence). Returns the read offset with the most confidence behind it
+/// (nearest to 0 on a tie): corrected sample `n` is `stream[n + offset]`.
+///
+/// A disc can match several pressings at different offsets; the first one
+/// found is not necessarily the one most submissions agree on.
+pub fn detect_offset(stream: &[u32], sector_450: usize, known: &[(u32, u32)]) -> Option<i32> {
     let base = sector_450 as i64;
-    (-OFFSET_SEARCH..OFFSET_SEARCH).find(|&off| {
-        let from = base + off as i64;
-        if from < 0 || from as usize + SECTOR_SAMPLES > stream.len() {
-            return false;
-        }
-        let crc = stream[from as usize..from as usize + SECTOR_SAMPLES]
-            .iter()
-            .enumerate()
-            .fold(0u32, |acc, (j, &s)| {
-                acc.wrapping_add(s.wrapping_mul(j as u32 + 1))
-            });
-        crc != 0 && known.contains(&crc)
-    })
+    (-OFFSET_SEARCH..OFFSET_SEARCH)
+        .filter_map(|off| {
+            let from = base + off as i64;
+            if from < 0 || from as usize + SECTOR_SAMPLES > stream.len() {
+                return None;
+            }
+            let crc = stream[from as usize..from as usize + SECTOR_SAMPLES]
+                .iter()
+                .enumerate()
+                .fold(0u32, |acc, (j, &s)| {
+                    acc.wrapping_add(s.wrapping_mul(j as u32 + 1))
+                });
+            let confidence: u32 = known
+                .iter()
+                .filter(|(c, _)| crc != 0 && *c == crc)
+                .map(|(_, n)| n)
+                .sum();
+            (confidence > 0).then_some((off, confidence))
+        })
+        .max_by_key(|&(off, confidence)| (confidence, std::cmp::Reverse(off.unsigned_abs())))
+        .map(|(off, _)| off)
 }
 
 /// Highest confidence among database entries matching either checksum
@@ -206,12 +218,13 @@ pub fn best_match(
         .max_by_key(|&(conf, _)| conf)
 }
 
-/// Sector-450 checksums the database knows for audio track `track`.
-pub fn offset_crcs(subs: &[Submission], track: usize) -> Vec<u32> {
+/// Sector-450 checksums the database knows for audio track `track`, with
+/// each pressing's confidence.
+pub fn offset_crcs(subs: &[Submission], track: usize) -> Vec<(u32, u32)> {
     subs.iter()
         .filter_map(|s| s.tracks.get(track))
-        .map(|e| e.offset_crc)
-        .filter(|&c| c != 0)
+        .filter(|e| e.offset_crc != 0)
+        .map(|e| (e.offset_crc, e.confidence as u32))
         .collect()
 }
 
@@ -309,6 +322,27 @@ mod tests {
     }
 
     #[test]
+    fn detection_prefers_the_pressing_most_submissions_agree_on() {
+        let truth: Vec<u32> = (0..500 * SECTOR_SAMPLES as u32)
+            .map(|i| i.wrapping_mul(2654435761))
+            .collect();
+        let crc_at = |from: usize| {
+            truth[from..from + SECTOR_SAMPLES]
+                .iter()
+                .enumerate()
+                .fold(0u32, |a, (j, &s)| {
+                    a.wrapping_add(s.wrapping_mul(j as u32 + 1))
+                })
+        };
+        // A minority pressing 36 samples early, the majority 6 samples late.
+        let known = [
+            (crc_at(OFFSET_CRC_START - 36), 4),
+            (crc_at(OFFSET_CRC_START + 6), 96),
+        ];
+        assert_eq!(detect_offset(&truth, OFFSET_CRC_START, &known), Some(6));
+    }
+
+    #[test]
     fn detects_and_applies_offset() {
         let truth: Vec<u32> = (0..500 * SECTOR_SAMPLES as u32)
             .map(|i| i.wrapping_mul(2654435761))
@@ -321,7 +355,7 @@ mod tests {
             });
         // A drive that delivers everything 6 samples late.
         let read = apply_offset(&truth, -6);
-        let offset = detect_offset(&read, OFFSET_CRC_START, &[known_crc]).unwrap();
+        let offset = detect_offset(&read, OFFSET_CRC_START, &[(known_crc, 1)]).unwrap();
         assert_eq!(offset, 6);
         let fixed = apply_offset(&read, offset);
         assert_eq!(fixed[..fixed.len() - 6], truth[..truth.len() - 6]);

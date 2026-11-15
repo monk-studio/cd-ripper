@@ -56,7 +56,9 @@ pub struct DriveDb(Vec<(String, i32, u8)>);
 impl DriveDb {
     pub fn parse(data: &[u8]) -> Self {
         Self(
-            data.chunks_exact(69)
+            data.as_chunks::<69>()
+                .0
+                .iter()
                 .map(|r| {
                     let offset = i16::from_le_bytes([r[0], r[1]]) as i32;
                     let name = r[2..34].split(|&b| b == 0).next().unwrap_or(&[]);
@@ -70,16 +72,24 @@ impl DriveDb {
     /// best-attested entry when a name appears more than once.
     pub fn lookup(&self, model: &str) -> Option<i32> {
         let want = normalize(model);
-        self.0.iter().filter(|(name, ..)| *name == want).max_by_key(|(.., n)| *n).map(|(_, o, _)| *o)
+        self.0
+            .iter()
+            .filter(|(name, ..)| *name == want)
+            .max_by_key(|(.., n)| *n)
+            .map(|(_, o, _)| *o)
     }
 
     /// The database, from a cached copy in `cache` (a file) when fresh enough.
     pub fn load(cache: &Path) -> anyhow::Result<Self> {
         let fresh = std::fs::metadata(cache)
             .and_then(|m| m.modified())
-            .is_ok_and(|t| SystemTime::now().duration_since(t).unwrap_or_default() < DRIVE_DB_MAX_AGE);
+            .is_ok_and(|t| {
+                SystemTime::now().duration_since(t).unwrap_or_default() < DRIVE_DB_MAX_AGE
+            });
         if !fresh {
-            let resp = ureq::get(DRIVE_DB_URL).set("User-Agent", USER_AGENT).call()?;
+            let resp = ureq::get(DRIVE_DB_URL)
+                .set("User-Agent", USER_AGENT)
+                .call()?;
             let mut data = Vec::new();
             resp.into_reader().read_to_end(&mut data)?;
             if let Some(dir) = cache.parent() {
@@ -95,7 +105,11 @@ impl DriveDb {
 /// "HL-DT-ST - BD-RE BP71N" and "HL-DT-ST BD-RE BP71N" both become
 /// "HL-DT-ST BD-RE BP71N": the database pads vendors and adds " - ".
 fn normalize(name: &str) -> String {
-    name.replace(" - ", " ").split_whitespace().collect::<Vec<_>>().join(" ").to_uppercase()
+    name.replace(" - ", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_uppercase()
 }
 
 /// What we know about one drive.
@@ -118,7 +132,10 @@ pub struct DriveStore {
 
 impl DriveStore {
     pub fn load(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
+        std::fs::read(path)
+            .ok()
+            .and_then(|d| serde_json::from_slice(&d).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -148,7 +165,10 @@ impl DriveStore {
     pub fn observe(&mut self, model: &str, offset: i32) {
         let r = self.drives.entry(normalize(model)).or_default();
         *r.observed.entry(offset).or_default() += 1;
-        if matches!(r.source, Some(OffsetSource::Manual | OffsetSource::AccurateRipDrives)) {
+        if matches!(
+            r.source,
+            Some(OffsetSource::Manual | OffsetSource::AccurateRipDrives)
+        ) {
             return;
         }
         let total: u32 = r.observed.values().sum();
@@ -197,7 +217,11 @@ mod tests {
         data.extend(record("HL       - BP55EB40", 103, 3));
         data.extend(record("HL-DT-ST - BD-RE BP71N", 7, 2));
         let db = DriveDb::parse(&data);
-        assert_eq!(db.lookup("HL-DT-ST BD-RE BP71N"), Some(6), "best-attested entry wins");
+        assert_eq!(
+            db.lookup("HL-DT-ST BD-RE BP71N"),
+            Some(6),
+            "best-attested entry wins"
+        );
         assert_eq!(db.lookup("HL BP55EB40"), Some(103));
         assert_eq!(db.lookup("Some Other Drive"), None);
     }
@@ -213,7 +237,11 @@ mod tests {
         assert_eq!(s.known("D"), Some((6, OffsetSource::Learned)));
         s.observe("D", -36);
         s.observe("D", -36);
-        assert_eq!(s.known("D"), Some((6, OffsetSource::Learned)), "no majority, keep what we had");
+        assert_eq!(
+            s.known("D"),
+            Some((6, OffsetSource::Learned)),
+            "no majority, keep what we had"
+        );
     }
 
     #[test]

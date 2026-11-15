@@ -64,18 +64,44 @@ After secure mode the track's checksums are checked against AccurateRip again.
 
 ### 1.4 Read offset
 
-- Corrected sample `n` is raw sample `n + offset`.
-- By default the offset is **detected from AccurateRip for every disc**: CDR
-  reads about 11 sectors around sector 450 of a track and searches ±4 sectors
-  for a position whose checksum matches the database's offset-finding
-  checksum. Tracks are tried in order until one matches.
-- `--offset` sets it by hand.
-- If the disc isn't in AccurateRip and no offset is given, the rip stops with
-  an error.
+The read offset belongs to the **drive**, and every rip's audio is aligned to
+it: corrected sample `n` is raw sample `n + offset`.
 
-*Why:* XLD's "set automatically" only looks the drive model up in a list
-frozen at release, and with an unknown drive it silently uses 0. On a
-BP71N its files came out 6 samples off (CDR-4, CDR-9).
+The drive offset comes from, in order:
+
+1. **Set by hand** for this rip (`--offset`).
+2. **Remembered** for this drive in `drives.json` (a database lookup or an
+   offset learned earlier), in CDR's data folder (macOS:
+   `~/Library/Application Support/CDR`).
+3. **AccurateRip's drive database** (`DriveOffsets.bin`), looked up by the
+   drive's model. The result is remembered.
+4. **This disc alone**, when nothing above knows the drive: the offset at
+   which this disc matches AccurateRip (below). It may be the pressing's
+   alignment rather than the drive's, and the log says so.
+
+If none of these gives an offset, the rip stops and asks for one.
+
+**Pressing offset.** For every disc in AccurateRip, CDR also finds where this
+disc's pressing lines up with the database: it reads about 11 sectors around
+sector 450 of a track and searches ±4 sectors for the database's
+offset-finding checksums, track by track until one matches. A disc can match
+several pressings; the offset with the most AccurateRip confidence behind it
+wins (nearest to 0 on a tie). On 鋼の錬金術師 the first match found was a
+pressing with confidence 4–5 and the best one, 42 samples away, had 96. This
+is evidence about the drive, not the drive offset itself.
+
+**Learning.** Each disc's pressing offset is recorded for the drive. Once 3 or
+more discs agree on an offset, and they outnumber all other offsets seen,
+it becomes the drive's learned offset. A single disc never overrides an offset
+set by hand or taken from the drive database.
+
+*Why:* a disc matching AccurateRip at some offset only shows how its
+pressing lines up with the pressing in the database. The same LG BP71N gave
++6 on one disc and −36 on another; its real offset is +6 (AccurateRip's drive
+database agrees). Aligning each disc to its database match shifts the
+track boundaries away from the disc's own layout (CDR-9). XLD instead looks
+the model up in a list frozen at its release; it doesn't know the BP71N and
+silently uses 0, which left its files 6 samples off (CDR-4).
 
 ### 1.5 What is ripped
 
@@ -92,8 +118,12 @@ BP71N its files came out 6 samples off (CDR-4, CDR-9).
   lead-out; the CDDB ID uses all tracks.
 - Checksums v1 and v2 skip the first 2939 samples of the first track and the
   last 2940 of the last track, as AccurateRip does.
-- A track matches if either checksum equals any pressing's entry. The highest
-  confidence among matches is reported.
+- A track matches if either checksum equals any pressing's entry, first at
+  the drive offset. If nothing matches there and the disc's pressing lines up
+  at another offset, the checksums are also taken at that alignment (from a
+  few extra sectors read around the track). A match there counts as accurate,
+  **other pressing**; the audio is still written at the drive offset.
+- The highest confidence among matches is reported.
 
 ### 2.2 Disc verdict
 
@@ -103,9 +133,9 @@ BP71N its files came out 6 samples off (CDR-4, CDR-9).
 | **Verified** | No track is suspicious, and the tracks AccurateRip didn't confirm read identically twice in secure mode. |
 | **Check** | At least one track has suspicious positions. The verdict names the tracks. |
 
-Per track the result is `accurate`, `secure`, `secure, not in AccurateRip's
-pressings` (the disc is in the database but this track matched no pressing),
-or `SUSPICIOUS`.
+Per track the result is `accurate`, `accurate, other pressing`, `secure`,
+`secure, not in AccurateRip's pressings` (the disc is in the database but this
+track matched no pressing), or `SUSPICIOUS`.
 
 ## 3. Metadata
 
@@ -193,12 +223,16 @@ in place.
 
 Every filed album gets two records of the same facts.
 
-- **`rip.log`**, for people: tool and date (UTC), drive, offset and whether it
-  was detected, mode, release, disc IDs, AccurateRip pressings; one line per
-  track (start, length, CRC v1/v2, AccurateRip match, reads, C2, result);
+- **`rip.log`**, for people: tool and date (UTC), drive, read offset and where
+  it came from, the pressing offset when it differs, mode, release, disc IDs,
+  AccurateRip pressings; one line per track (start, length, CRC v1/v2,
+  AccurateRip match, with `@offset` for another pressing, reads, C2, result);
   suspicious positions; each file's audio MD5; the verdict.
 - **`rip.json`**, for tools, with `"format": 1`. Fields are only ever added;
-  a change in meaning gets a new format number.
+  a change in meaning gets a new format number. `offset_source` is one of
+  `manual`, `accurate-rip-drives`, `learned`, `this-disc`;
+  `pressing_offset` (disc, and per AccurateRip match) is set when a pressing
+  lines up elsewhere.
 - The audio MD5 is the FLAC STREAMINFO MD5, so a file can be checked against
   the log years later.
 - Positions are written `m:ss.ff` (minutes, seconds, CD frames of 1/75 s).
@@ -210,7 +244,7 @@ Every filed album gets two records of the same facts.
 | Service | Rules |
 |---|---|
 | All | User-Agent `CDR/<version> (+https://monk-studio.com)`. No personal data. |
-| AccurateRip | Agreed with Illustrate (2026-11-10, CDR-2): free while CDR is donation-funded, a $250–500/year licence if sold. Identify via User-Agent, cache where possible, **never submit**. |
+| AccurateRip | Agreed with Illustrate (2026-11-10, CDR-2): free while CDR is donation-funded, a $250–500/year licence if sold. Identify via User-Agent, cache where possible, **never submit**. The drive database is cached for 30 days. |
 | MusicBrainz | One request per disc. On 503, back off 2, 4 and 8 s. |
 | Cover Art Archive | Thumbnails only (1200 px); originals can be tens of MB. |
 | CTDB | Not used yet; awaiting the maintainer's reply (CDR-2). |
@@ -218,9 +252,12 @@ Every filed album gets two records of the same facts.
 ## 7. Known limitations
 
 - Enhanced-CD AccurateRip disc IDs are unverified on a real disc.
-- No AccurateRip or MusicBrainz cache yet (AccurateRip asks for one).
-- A disc not in AccurateRip needs the offset set by hand; there is no
-  drive-model fallback or per-drive memory yet (CDR-9).
+- No cache yet for AccurateRip disc results or MusicBrainz lookups
+  (AccurateRip asks for one); only its drive database is cached.
+- A drive missing from AccurateRip's drive database needs 3 agreeing discs
+  before its offset is learned; until then each disc stands in for it.
+- Only one pressing offset is tried per disc (the first track that reveals
+  one).
 - The cache flush runs even on drives without an audio cache (about 7% of
   secure-mode time on a BP71N).
 - HTOA, CD-Text, ISRC and pre-emphasis are not handled; pre-emphasis is only

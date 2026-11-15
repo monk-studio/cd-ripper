@@ -16,7 +16,8 @@ struct Args {
     /// Disc device, e.g. /dev/disk4. Defaults to the disc in the first optical drive.
     #[arg(long)]
     device: Option<String>,
-    /// Drive read offset in samples. Detected from AccurateRip when omitted.
+    /// Drive read offset in samples, for this rip. When omitted: the one
+    /// remembered for the drive, AccurateRip's drive database, or this disc.
     #[arg(long, allow_hyphen_values = true)]
     offset: Option<i32>,
     /// Music library folder (local or a mounted share) to file the tagged FLACs into.
@@ -144,6 +145,7 @@ fn main() -> anyhow::Result<()> {
         tags,
         offset: args.offset,
         secure: args.secure,
+        data_dir: cdr_core::offsets::data_dir(),
     };
     let report = album::rip(drive.as_mut(), plan, |event| match event {
         Event::AccurateRip(Some(n)) => {
@@ -151,10 +153,16 @@ fn main() -> anyhow::Result<()> {
             println!("  {n} submission(s) in the database");
         }
         Event::AccurateRip(None) => println!("  disc not in the database"),
-        Event::Offset { offset, detected } => println!(
-            "Read offset: {offset:+} samples{}",
-            if detected { " (detected)" } else { "" }
-        ),
+        Event::Offset {
+            offset,
+            source,
+            pressing,
+        } => {
+            println!("Read offset: {offset:+} samples ({})", source.describe());
+            if let Some(p) = pressing {
+                println!("  this pressing matches AccurateRip at {p:+}");
+            }
+        }
         Event::Cover(Some(c)) => println!("Cover: {} KB {}", c.data.len() / 1024, c.mime_type),
         Event::Cover(None) if filing => println!("  no cover found"),
         Event::Cover(None) => {}

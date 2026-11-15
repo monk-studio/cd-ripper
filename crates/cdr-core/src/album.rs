@@ -9,6 +9,7 @@ use crate::accuraterip::{self, DiscIds};
 use crate::coverart::{self, Cover};
 use crate::drive::CdDrive;
 use crate::musicbrainz::{DiscToc, Release};
+use crate::offsets::{DriveDb, DriveStore, OffsetSource};
 use crate::report::{self, RipReport, TrackReport};
 use crate::rip::Ripper;
 use crate::tags::Tags;
@@ -22,8 +23,12 @@ pub struct Plan<'a> {
     /// Library-absolute path of each audio track; empty to rip without filing.
     pub dests: Vec<PathBuf>,
     pub tags: Vec<Tags>,
-    /// Read offset to use; detected from AccurateRip when `None`.
+    /// The drive's read offset, set by hand. `None` to use the one remembered
+    /// for the drive, AccurateRip's drive database, or this disc (in that order).
     pub offset: Option<i32>,
+    /// Where drive offsets are remembered and AccurateRip's drive database
+    /// is cached ([`crate::offsets::data_dir`]); `None` to keep nothing.
+    pub data_dir: Option<PathBuf>,
     /// Read every track twice.
     pub secure: bool,
 }
@@ -32,9 +37,12 @@ pub struct Plan<'a> {
 pub enum Event {
     /// Pressings in AccurateRip (`None`: the disc isn't in it).
     AccurateRip(Option<usize>),
+    /// The drive offset the rip uses, and the offset this disc's pressing
+    /// matched AccurateRip at, when that differs.
     Offset {
         offset: i32,
-        detected: bool,
+        source: OffsetSource,
+        pressing: Option<i32>,
     },
     Cover(Option<Cover>),
     /// Sectors read of audio track `track` (0-based).
@@ -87,18 +95,52 @@ pub fn rip(
 
     let mut ripper = Ripper::new(drive, toc, 0);
     ripper.always_secure = plan.secure;
-    ripper.offset = match (plan.offset, &db) {
-        (Some(o), _) => o,
-        (None, Some(subs)) => ripper
-            .detect_offset(subs)
-            .context("could not detect the read offset from AccurateRip; set it by hand")?,
-        (None, None) => {
-            bail!("disc not in AccurateRip, so the read offset can't be detected; set it by hand")
+    // Where this disc's pressing lines up with AccurateRip: evidence about the
+    // drive, and the alignment its tracks may match at.
+    let this_disc = db.as_deref().and_then(|subs| ripper.detect_offset(subs));
+    let store_path = plan.data_dir.as_ref().map(|d| d.join("drives.json"));
+    let mut store = store_path
+        .as_deref()
+        .map(DriveStore::load)
+        .unwrap_or_default();
+    let model = drive_model.as_deref();
+    if let (Some(model), Some(o)) = (model, this_disc) {
+        store.observe(model, o);
+    }
+    let (offset, source) = match plan.offset {
+        Some(o) => (o, OffsetSource::Manual),
+        None => {
+            let known = model.and_then(|m| store.known(m));
+            let from_db = || {
+                let (m, dir) = (model?, plan.data_dir.as_ref()?);
+                let o = DriveDb::load(&dir.join("DriveOffsets.bin"))
+                    .ok()?
+                    .lookup(m)?;
+                Some((o, OffsetSource::AccurateRipDrives))
+            };
+            match known
+                .or_else(from_db)
+                .or(this_disc.map(|o| (o, OffsetSource::ThisDisc)))
+            {
+                Some(found) => found,
+                None => bail!(
+                    "the drive's read offset is unknown and the disc isn't in AccurateRip; set it by hand"
+                ),
+            }
         }
     };
+    if let (Some(m), OffsetSource::AccurateRipDrives) = (model, source) {
+        store.remember(m, offset, source);
+    }
+    if let Some(path) = &store_path {
+        store.save(path)?;
+    }
+    ripper.offset = offset;
+    ripper.pressing_offsets = this_disc.filter(|&o| o != offset).into_iter().collect();
     on_event(Event::Offset {
-        offset: ripper.offset,
-        detected: plan.offset.is_none(),
+        offset,
+        source,
+        pressing: this_disc.filter(|&o| o != offset),
     });
 
     // Encode locally, then copy into the library: a network share only sees finished files.
@@ -131,7 +173,9 @@ pub fn rip(
             date: String::new(),
             drive: drive_model,
             read_offset: ripper.offset,
-            offset_detected: plan.offset.is_none(),
+            offset_detected: source == OffsetSource::ThisDisc,
+            offset_source: source,
+            pressing_offset: ripper.pressing_offsets.first().copied(),
             secure_mode: plan.secure,
             artist: plan.release.map(|r| r.artist.clone()),
             album: plan.release.map(|r| r.title.clone()),

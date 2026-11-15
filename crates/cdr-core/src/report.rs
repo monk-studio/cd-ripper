@@ -8,6 +8,7 @@ use md5::{Digest, Md5};
 use serde::Serialize;
 
 use crate::SECTOR_SAMPLES;
+use crate::offsets::OffsetSource;
 use crate::rip::TrackRip;
 
 pub const FORMAT: u32 = 1;
@@ -19,8 +20,15 @@ pub struct RipReport {
     /// When the rip finished, RFC 3339 in UTC.
     pub date: String,
     pub drive: Option<String>,
+    /// The drive's read offset, which the audio is aligned to.
     pub read_offset: i32,
+    /// The offset came from this disc alone, the drive's being unknown.
     pub offset_detected: bool,
+    /// Where the read offset came from.
+    pub offset_source: OffsetSource,
+    /// The offset this disc's pressing matched AccurateRip at, when it
+    /// differs from the drive's.
+    pub pressing_offset: Option<i32>,
     /// Every track read twice, not only those AccurateRip couldn't confirm.
     pub secure_mode: bool,
     pub artist: Option<String>,
@@ -63,6 +71,9 @@ pub struct TrackReport {
 pub struct ArMatch {
     pub confidence: u32,
     pub version: &'static str,
+    /// Set when the track matched another pressing, at this offset; the
+    /// audio itself stays aligned to the drive's offset.
+    pub pressing_offset: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +101,7 @@ impl TrackReport {
             accuraterip: rip.accurate.map(|(confidence, version)| ArMatch {
                 confidence,
                 version,
+                pressing_offset: rip.pressing_offset,
             }),
             passes: rip.passes,
             reread_sectors: rip.reread_sectors,
@@ -105,6 +117,7 @@ impl TrackReport {
 
     fn result(&self, in_database: bool) -> &'static str {
         match (self.accuraterip, self.suspicious.is_empty()) {
+            (Some(m), _) if m.pressing_offset.is_some() => "accurate, other pressing",
             (Some(_), _) => "accurate",
             (None, false) => "SUSPICIOUS",
             (None, true) if in_database => "secure, not in AccurateRip's pressings",
@@ -174,14 +187,15 @@ impl RipReport {
         line(format!("Date:          {}", self.date));
         line(format!("Drive:         {}", opt(&self.drive)));
         line(format!(
-            "Read offset:   {:+} samples{}",
+            "Read offset:   {:+} samples ({})",
             self.read_offset,
-            if self.offset_detected {
-                " (detected from AccurateRip)"
-            } else {
-                ""
-            }
+            self.offset_source.describe()
         ));
+        if let Some(p) = self.pressing_offset {
+            line(format!(
+                "Pressing:      matches AccurateRip at {p:+} samples"
+            ));
+        }
         line(format!(
             "Mode:          {}",
             if self.secure_mode {
@@ -210,14 +224,17 @@ impl RipReport {
         ));
         line(String::new());
         line(
-            "Track  Start     Length    CRC v1    CRC v2    AccurateRip     Reads      C2   Result"
+            "Track  Start     Length    CRC v1    CRC v2    AccurateRip         Reads      C2   Result"
                 .into(),
         );
         let in_db = self.accuraterip_submissions.is_some();
         for t in &self.tracks {
             let ar = t
                 .accuraterip
-                .map(|m| format!("{} conf {}", m.version, m.confidence))
+                .map(|m| match m.pressing_offset {
+                    Some(p) => format!("{} conf {} @{p:+}", m.version, m.confidence),
+                    None => format!("{} conf {}", m.version, m.confidence),
+                })
                 .unwrap_or_else(|| "-".into());
             let reads = match (t.reread_sectors, t.slowed_down) {
                 (0, _) => t.passes.to_string(),
@@ -230,7 +247,7 @@ impl RipReport {
                 None => "-",
             };
             line(format!(
-                "{:5}  {}  {}  {}  {}  {:14}  {:9}  {:3}  {}",
+                "{:5}  {}  {}  {}  {}  {:18}  {:9}  {:3}  {}",
                 t.number,
                 timestamp(t.start_sector as usize),
                 timestamp(t.length_sectors as usize),
@@ -332,6 +349,7 @@ mod tests {
             suspicious,
             c2: Some(false),
             slowed_down: false,
+            pressing_offset: None,
         }
     }
 
@@ -343,6 +361,8 @@ mod tests {
             drive: Some("DRIVE".into()),
             read_offset: 6,
             offset_detected: true,
+            offset_source: OffsetSource::ThisDisc,
+            pressing_offset: None,
             secure_mode: false,
             artist: Some("羊文学".into()),
             album: Some("12 hugs".into()),
