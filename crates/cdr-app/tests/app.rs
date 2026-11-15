@@ -76,6 +76,10 @@ struct Fake {
     denied: AtomicBool,
     /// What the system opens on insert.
     auto_open: Mutex<Option<AutoOpen>>,
+    /// Replaces the disc's MusicBrainz releases.
+    releases: Mutex<Option<Vec<Release>>>,
+    /// What the last rip was asked to write.
+    ripped: Mutex<Option<RipRequest>>,
 }
 
 impl Backend for Fake {
@@ -85,7 +89,11 @@ impl Backend for Fake {
             return Err(anyhow::Error::new(denied).context("opening /dev/rdisk9"));
         }
         anyhow::ensure!(!self.ejected.load(Ordering::SeqCst), "no disc");
-        Ok(disc())
+        let mut d = disc();
+        if let Some(releases) = self.releases.lock().unwrap().clone() {
+            d.releases = releases;
+        }
+        Ok(d)
     }
 
     fn app_opened_on_insert(&self) -> Option<AutoOpen> {
@@ -104,6 +112,7 @@ impl Backend for Fake {
         on_event: &mut dyn FnMut(Event),
     ) -> anyhow::Result<RipReport> {
         self.secure.store(request.secure, Ordering::SeqCst);
+        let dests = request.dests.clone();
         let mut tracks = Vec::new();
         for (n, t) in disc.toc.tracks.iter().enumerate() {
             on_event(Event::Progress {
@@ -117,7 +126,7 @@ impl Backend for Fake {
                 artist: None,
                 start_sector: t.start,
                 length_sectors: 0,
-                file: request.dests.get(n).map(|d| d.display().to_string()),
+                file: dests.get(n).map(|d| d.display().to_string()),
                 audio_md5: String::new(),
                 crc_v1: String::new(),
                 crc_v2: String::new(),
@@ -147,7 +156,11 @@ impl Backend for Fake {
             offset_detected: false,
             offset_source: OffsetSource::AccurateRipDrives,
             pressing_offset: None,
-            secure_mode: request.secure,
+            secure_mode: {
+                let secure = request.secure;
+                *self.ripped.lock().unwrap() = Some(request);
+                secure
+            },
             artist: None,
             album: None,
             musicbrainz_disc_id: String::new(),
@@ -314,4 +327,116 @@ fn speaks_chinese_when_the_system_does() {
         .unwrap();
     assert!(app.shows("✓ 准确（40）"));
     assert!(app.shows("弹出"));
+}
+
+fn tag(request: &RipRequest, track: usize, key: &str) -> Option<String> {
+    request.tags[track]
+        .get(key)
+        .and_then(|v| v.first())
+        .cloned()
+}
+
+fn taiwan_release() -> Release {
+    let mut r = disc().releases[0].clone();
+    r.id = "rel-tw".into();
+    r.country = Some("TW".into());
+    r.label = Some("Universal".into());
+    r.catalog_number = Some("X-1".into());
+    r
+}
+
+#[test]
+fn several_releases_can_be_chosen_between() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    *fake.releases.lock().unwrap() = Some(vec![disc().releases[0].clone(), taiwan_release()]);
+    let mut app = start_with(fake, &[]);
+    app.wait_for("text:2023-12-06 · TW · Universal · X-1")
+        .unwrap();
+    // The header shows the first release; the picker lists both.
+    let jp = "text:2023-12-06 · JP · F.C.L.S. · KSCL-3482";
+    let tw = "text:2023-12-06 · TW · Universal · X-1";
+    assert_eq!(app.screen().count(jp), Ok(2));
+    app.press(tw).unwrap();
+    app.wait_until(
+        "the header follows the choice",
+        std::time::Duration::from_secs(5),
+        |screen| screen.count(tw) == Ok(2),
+    )
+    .unwrap();
+    assert_eq!(app.screen().count(jp), Ok(1));
+}
+
+#[test]
+fn unknown_disc_gets_tags_typed_in() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    *fake.releases.lock().unwrap() = Some(vec![]);
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:Unknown album").unwrap();
+    app.press("text:Add Tags").unwrap();
+    assert_eq!(
+        app.screen().enabled("text:Done"),
+        Ok(false),
+        "album and artist come first"
+    );
+    app.type_text("id:album-title", "Live Tape").unwrap();
+    app.type_text("id:album-artist", "Someone").unwrap();
+    app.type_text("id:album-year", "2024").unwrap();
+    app.type_text("id:track-title-1", "Intro").unwrap();
+    app.press("text:Done").unwrap();
+    app.wait_for("text:Live Tape").unwrap();
+    assert!(app.shows("Intro"));
+    app.press("text:Rip").unwrap();
+    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
+        .unwrap();
+
+    let ripped = fake.ripped.lock().unwrap();
+    let request = ripped.as_ref().unwrap();
+    assert_eq!(tag(request, 0, "ALBUM").as_deref(), Some("Live Tape"));
+    assert_eq!(tag(request, 0, "ALBUMARTIST").as_deref(), Some("Someone"));
+    assert_eq!(tag(request, 0, "ARTIST").as_deref(), Some("Someone"));
+    assert_eq!(tag(request, 0, "TITLE").as_deref(), Some("Intro"));
+    assert_eq!(tag(request, 0, "DATE").as_deref(), Some("2024"));
+    assert_eq!(tag(request, 1, "TITLE"), None, "untyped titles stay empty");
+    let path = request.dests[0].to_string_lossy();
+    assert!(
+        path.ends_with("Someone/Live Tape (2024)/01 - Intro.flac"),
+        "{path}"
+    );
+}
+
+#[test]
+fn edits_to_a_known_release_keep_its_musicbrainz_ids() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Edit Tags").unwrap();
+    app.clear("id:track-title-2").unwrap();
+    app.type_text("id:track-title-2", "more than words (live)")
+        .unwrap();
+    app.press("text:Done").unwrap();
+    app.wait_for("text:more than words (live)").unwrap();
+    app.press("text:Rip").unwrap();
+    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
+        .unwrap();
+
+    let ripped = fake.ripped.lock().unwrap();
+    let request = ripped.as_ref().unwrap();
+    assert_eq!(
+        tag(request, 1, "TITLE").as_deref(),
+        Some("more than words (live)")
+    );
+    assert_eq!(
+        tag(request, 1, "MUSICBRAINZ_ALBUMID").as_deref(),
+        Some("rel")
+    );
+    assert_eq!(
+        tag(request, 0, "TITLE").as_deref(),
+        Some("Hug.m4a"),
+        "other tracks untouched"
+    );
 }

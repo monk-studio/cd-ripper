@@ -1,6 +1,9 @@
 {
   "_version": 2,
-  "start.title": { "en": "Insert an audio CD", "zh-CN": "请放入音乐 CD" },
+  "start.title": {
+    "en": "Insert an audio CD",
+    "zh-CN": "请放入音乐 CD"
+  },
   "start.subtitle": {
     "en": "CDR reads it, checks every track against AccurateRip and files it into your library.",
     "zh-CN": "CDR 会读取光盘，逐轨对照 AccurateRip 校验，然后存入你的曲库。"
@@ -17,18 +20,42 @@
     "en": "macOS opens another app when you insert a CD, and it reads the disc at the same time as CDR. In System Settings › CDs & DVDs, set “When you insert a music CD” to Ignore.",
     "zh-CN": "插入 CD 时 macOS 会打开另一个 App，它会和 CDR 同时读盘。请在「系统设置 › CD 与 DVD」中把「插入音乐 CD 时」设为「忽略」。"
   },
-  "notice.check_again": { "en": "Check again", "zh-CN": "重新检查" },
-  "album.unknown": { "en": "Unknown album", "zh-CN": "未知专辑" },
-  "album.not_found": { "en": "Not found on MusicBrainz", "zh-CN": "MusicBrainz 上没有找到" },
-  "track.untitled": { "en": "Track %{n}", "zh-CN": "第 %{n} 轨" },
-  "track.reading": { "en": "Reading %{percent}%", "zh-CN": "读取中 %{percent}%" },
-  "track.accurate": { "en": "✓ Accurate (%{confidence})", "zh-CN": "✓ 准确（%{confidence}）" },
+  "notice.check_again": {
+    "en": "Check again",
+    "zh-CN": "重新检查"
+  },
+  "album.unknown": {
+    "en": "Unknown album",
+    "zh-CN": "未知专辑"
+  },
+  "album.not_found": {
+    "en": "Not found on MusicBrainz",
+    "zh-CN": "MusicBrainz 上没有找到"
+  },
+  "track.untitled": {
+    "en": "Track %{n}",
+    "zh-CN": "第 %{n} 轨"
+  },
+  "track.reading": {
+    "en": "Reading %{percent}%",
+    "zh-CN": "读取中 %{percent}%"
+  },
+  "track.accurate": {
+    "en": "✓ Accurate (%{confidence})",
+    "zh-CN": "✓ 准确（%{confidence}）"
+  },
   "track.accurate_other_pressing": {
     "en": "✓ Accurate (%{confidence}, other pressing)",
     "zh-CN": "✓ 准确（%{confidence}，其他压制版本）"
   },
-  "track.secure": { "en": "✓ Read the same twice", "zh-CN": "✓ 两次读取一致" },
-  "track.check": { "en": "⚠ Check at %{position}", "zh-CN": "⚠ 请检查 %{position}" },
+  "track.secure": {
+    "en": "✓ Read the same twice",
+    "zh-CN": "✓ 两次读取一致"
+  },
+  "track.check": {
+    "en": "⚠ Check at %{position}",
+    "zh-CN": "⚠ 请检查 %{position}"
+  },
   "verdict.perfect": {
     "en": "Perfect: all %{total} tracks match AccurateRip",
     "zh-CN": "完美：%{total} 轨全部与 AccurateRip 一致"
@@ -41,15 +68,72 @@
     "en": "Check tracks %{tracks}: reads didn't agree in places",
     "zh-CN": "请检查第 %{tracks} 轨：部分位置读取不一致"
   },
-  "rip.ripping": { "en": "Ripping…", "zh-CN": "抓取中…" },
-  "rip.failed": { "en": "Rip failed: %{error}", "zh-CN": "抓取失败：%{error}" },
-  "rip.already_in_library": { "en": "Already in the library: %{path}", "zh-CN": "曲库里已有：%{path}" },
-  "library.none": { "en": "No library folder chosen", "zh-CN": "还没有选择曲库文件夹" },
-  "library.choose": { "en": "Choose Library…", "zh-CN": "选择曲库…" },
-  "library.use": { "en": "Use as Library", "zh-CN": "用作曲库" },
-  "action.rip": { "en": "Rip", "zh-CN": "开始抓取" },
-  "action.show_in_finder": { "en": "Show in Finder", "zh-CN": "在访达中显示" },
-  "action.eject": { "en": "Eject", "zh-CN": "弹出" },
-  "action.eject_failed": { "en": "Couldn't eject: %{error}", "zh-CN": "无法弹出：%{error}" },
-  "setting.secure": { "en": "Read every track twice", "zh-CN": "每轨读取两遍" }
+  "rip.ripping": {
+    "en": "Ripping…",
+    "zh-CN": "抓取中…"
+  },
+  "rip.failed": {
+    "en": "Rip failed: %{error}",
+    "zh-CN": "抓取失败：%{error}"
+  },
+  "rip.already_in_library": {
+    "en": "Already in the library: %{path}",
+    "zh-CN": "曲库里已有：%{path}"
+  },
+  "library.none": {
+    "en": "No library folder chosen",
+    "zh-CN": "还没有选择曲库文件夹"
+  },
+  "library.choose": {
+    "en": "Choose Library…",
+    "zh-CN": "选择曲库…"
+  },
+  "library.use": {
+    "en": "Use as Library",
+    "zh-CN": "用作曲库"
+  },
+  "action.rip": {
+    "en": "Rip",
+    "zh-CN": "开始抓取"
+  },
+  "action.show_in_finder": {
+    "en": "Show in Finder",
+    "zh-CN": "在访达中显示"
+  },
+  "action.eject": {
+    "en": "Eject",
+    "zh-CN": "弹出"
+  },
+  "action.eject_failed": {
+    "en": "Couldn't eject: %{error}",
+    "zh-CN": "无法弹出：%{error}"
+  },
+  "setting.secure": {
+    "en": "Read every track twice",
+    "zh-CN": "每轨读取两遍"
+  },
+  "album.edit": {
+    "en": "Edit Tags",
+    "zh-CN": "编辑标签"
+  },
+  "album.add_tags": {
+    "en": "Add Tags",
+    "zh-CN": "添加标签"
+  },
+  "editor.album": {
+    "en": "Album",
+    "zh-CN": "专辑"
+  },
+  "editor.artist": {
+    "en": "Album artist",
+    "zh-CN": "专辑艺人"
+  },
+  "editor.year": {
+    "en": "Year",
+    "zh-CN": "年份"
+  },
+  "editor.done": {
+    "en": "Done",
+    "zh-CN": "完成"
+  }
 }

@@ -11,10 +11,11 @@ use std::time::Duration;
 use backend::{AutoOpen, Disc, RipRequest, backend, is_access_denied};
 use cdr_core::album::{self, Event};
 use cdr_core::library::DEFAULT_TEMPLATE;
-use cdr_core::musicbrainz::{DiscToc, Release};
+use cdr_core::musicbrainz::{DiscToc, Release, TrackMeta};
 use cdr_core::report::{RipReport, TrackReport, Verdict, timestamp};
 use cdr_core::storage_keys;
 use nsh_base::{button, progress, theme};
+use nsh_core::element::input;
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
@@ -81,6 +82,9 @@ pub fn App() -> impl IntoElement {
     // Another app the system opens on insert, which would read the disc too.
     let auto_open = signal(None::<AutoOpen>);
     let access_denied = signal(false);
+    // The user's tags, over the chosen release; and the draft while editing.
+    let edited = signal(None::<Release>);
+    let editing = signal(None::<Release>);
     let rows = signal(Vec::<Row>::new());
     let message = signal(None::<String>);
     // Tasks live as long as the UI they were started in. Handlers run inside
@@ -109,6 +113,8 @@ pub fn App() -> impl IntoElement {
                         access_denied.set(false);
                         rows.set(rows_for(&found, found.releases.first()));
                         chosen.set(0);
+                        edited.set(None);
+                        editing.set(None);
                         disc.set(Some(found));
                         phase.set(Phase::Ready);
                     }
@@ -121,8 +127,39 @@ pub fn App() -> impl IntoElement {
     });
 
     let release = move || {
-        disc.get()
-            .and_then(|d| d.releases.get(chosen.get()).cloned())
+        edited.get().or_else(|| {
+            disc.get()
+                .and_then(|d| d.releases.get(chosen.get()).cloned())
+        })
+    };
+    let show_release = move || {
+        if let Some(d) = disc.get() {
+            rows.set(rows_for(&d, release().as_ref()));
+        }
+    };
+    let choose_release = move |i: usize| {
+        chosen.set(i);
+        edited.set(None);
+        show_release();
+    };
+    let start_editing = move || {
+        let Some(d) = disc.get() else { return };
+        editing.set(Some(release().unwrap_or_else(|| blank_release(&d))));
+    };
+    let finish_editing = move || {
+        let Some(mut draft) = editing.get() else {
+            return;
+        };
+        // Track artists that followed the album artist keep following it.
+        let before = release().map(|r| r.artist).unwrap_or_default();
+        for t in &mut draft.tracks {
+            if t.artist.is_empty() || t.artist == before {
+                t.artist = draft.artist.clone();
+            }
+        }
+        edited.set(Some(draft));
+        editing.set(None);
+        show_release();
     };
 
     let choose_folder = move || {
@@ -144,7 +181,7 @@ pub fn App() -> impl IntoElement {
         let (Some(d), Some(root)) = (disc.get(), library.get()) else {
             return;
         };
-        let release = d.releases.get(chosen.get()).cloned();
+        let release = release();
         let disc_id = DiscToc::from_toc(&d.toc).disc_id();
         let count = d.toc.audio_tracks().count();
         let (tags, dests) = album::destinations(
@@ -295,9 +332,24 @@ pub fn App() -> impl IntoElement {
                     .flex_1()
                     .p_6()
                     .gap_4()
-                    .child(header(disc, chosen))
-                    .child(release_picker(disc, chosen, phase))
-                    .child(track_list(rows))
+                    .child(header(
+                        release,
+                        move || phase.get() == Phase::Ready && editing.get().is_none(),
+                        start_editing,
+                    ))
+                    .child(
+                        when(
+                            move || editing.get().is_some(),
+                            move || tag_editor(editing, finish_editing),
+                        )
+                        .otherwise(move || {
+                            view()
+                                .flex_1()
+                                .gap_4()
+                                .child(release_picker(disc, chosen, phase, choose_release))
+                                .child(track_list(rows))
+                        }),
+                    )
                     .child(when(
                         move || message.get().is_some(),
                         move || {
@@ -319,13 +371,14 @@ pub fn App() -> impl IntoElement {
         )
 }
 
-fn header(disc: Signal<Option<Disc>>, chosen: Signal<usize>) -> impl IntoElement {
-    let release = move || {
-        disc.get()
-            .and_then(|d| d.releases.get(chosen.get()).cloned())
-    };
+fn header(
+    release: impl Fn() -> Option<Release> + Copy + 'static,
+    can_edit: impl Fn() -> bool + Copy + 'static,
+    edit: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
     let cover = move || {
         release()
+            .filter(|r| !r.id.is_empty())
             .map(|r| format!("https://coverartarchive.org/release/{}/front-250", r.id))
             .unwrap_or_default()
     };
@@ -340,7 +393,7 @@ fn header(disc: Signal<Option<Disc>>, chosen: Signal<usize>) -> impl IntoElement
                 .overflow_hidden()
                 .bg(move || theme().muted)
                 .child(when(
-                    move || release().is_some(),
+                    move || release().is_some_and(|r| !r.id.is_empty()),
                     move || {
                         image(cover)
                             .size_full()
@@ -372,27 +425,45 @@ fn header(disc: Signal<Option<Disc>>, chosen: Signal<usize>) -> impl IntoElement
                         .text_color(move || theme().muted_foreground),
                 ),
         )
+        .child(when(can_edit, move || {
+            let key = if release().is_some() {
+                "album.edit"
+            } else {
+                "album.add_tags"
+            };
+            secondary_button(key, || false, edit.clone())
+        }))
 }
 
-/// Only shown when MusicBrainz knows several releases with this disc.
+/// Only shown when MusicBrainz knows several releases with this disc: each
+/// with its cover and what tells pressings apart.
 fn release_picker(
     disc: Signal<Option<Disc>>,
     chosen: Signal<usize>,
     phase: Signal<Phase>,
+    choose: impl Fn(usize) + Copy + 'static,
 ) -> impl IntoElement {
     let options = move || disc.get().map(|d| d.releases).unwrap_or_default();
     when(
         move || options().len() > 1,
         move || {
-            view().flex_row().flex_wrap().gap_2().child(each(
+            view().gap_2().child(each(
                 move || options().into_iter().enumerate().collect::<Vec<_>>(),
                 |(i, r)| (*i, r.id.clone()),
                 move |item, _| {
                     let i = move || item.get().0;
+                    let cover = move || {
+                        format!(
+                            "https://coverartarchive.org/release/{}/front-250",
+                            item.get().1.id
+                        )
+                    };
                     button()
-                        .px_3()
-                        .py_1()
-                        .rounded(px(6.0))
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .p_2()
+                        .rounded(px(8.0))
                         .border_1()
                         .border_color(move || {
                             if chosen.get() == i() {
@@ -401,13 +472,167 @@ fn release_picker(
                                 theme().border
                             }
                         })
+                        .selected(move || chosen.get() == i())
                         .disabled(move || phase.get() != Phase::Ready)
-                        .on_press(move || chosen.set(i()))
-                        .child(text(move || details(&item.get().1)).text_sm())
+                        .on_press(move || choose(i()))
+                        .child(
+                            view()
+                                .size(px(40.0))
+                                .rounded(px(4.0))
+                                .overflow_hidden()
+                                .bg(move || theme().muted)
+                                .child(
+                                    image(cover)
+                                        .size_full()
+                                        .object_fit(nsh_core::ResizeMode::Cover),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .flex_1()
+                                .child(
+                                    text(move || item.get().1.title)
+                                        .text_sm()
+                                        .number_of_lines(1),
+                                )
+                                .child(
+                                    text(move || details(&item.get().1))
+                                        .text_xs()
+                                        .text_color(move || theme().muted_foreground),
+                                ),
+                        )
                 },
             ))
         },
     )
+}
+
+/// The album's and every track's tags, editable. Album and album artist are
+/// needed to file the album; empty track titles become "Track N".
+fn tag_editor(
+    draft: Signal<Option<Release>>,
+    done: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    let edit = move |f: &dyn Fn(&mut Release)| {
+        draft.update(|d| {
+            if let Some(d) = d {
+                f(d)
+            }
+        })
+    };
+    let complete = move || {
+        draft
+            .get()
+            .is_some_and(|r| !r.title.trim().is_empty() && !r.artist.trim().is_empty())
+    };
+    let field = move |key: &'static str,
+                      id: &'static str,
+                      value: fn(&Release) -> String,
+                      set: fn(&mut Release, &str)| {
+        view()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                text(move || t!(key))
+                    .w(px(110.0))
+                    .text_sm()
+                    .text_color(move || theme().muted_foreground),
+            )
+            .child(
+                input()
+                    .test_id(id)
+                    .flex_1()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(move || theme().border)
+                    .value(move || draft.get().map(|r| value(&r)).unwrap_or_default())
+                    .on_change(move |text: &str| edit(&|r| set(r, text))),
+            )
+    };
+    view()
+        .flex_1()
+        .gap_2()
+        .child(field(
+            "editor.album",
+            "album-title",
+            |r| r.title.clone(),
+            |r, v| r.title = v.to_owned(),
+        ))
+        .child(field(
+            "editor.artist",
+            "album-artist",
+            |r| r.artist.clone(),
+            |r, v| r.artist = v.to_owned(),
+        ))
+        .child(field(
+            "editor.year",
+            "album-year",
+            |r| r.date.clone().unwrap_or_default(),
+            |r, v| r.date = Some(v.trim().to_owned()).filter(|d| !d.is_empty()),
+        ))
+        .child(scroll().flex_1().child(view().gap_1().child(each(
+            move || {
+                draft
+                    .get()
+                    .map(|r| r.tracks)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            },
+            |(n, _)| *n,
+            move |item, _| {
+                let n = move || item.get().0;
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        text(move || format!("{:2}", item.get().1.number))
+                            .w(px(24.0))
+                            .text_color(move || theme().muted_foreground),
+                    )
+                    .child(
+                        input()
+                            .test_id(&format!("track-title-{}", item.get_untracked().1.number))
+                            .flex_1()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(move || theme().border)
+                            .placeholder(move || t!("track.untitled", n = item.get().1.number))
+                            .value(move || item.get().1.title)
+                            .on_change(move |text: &str| {
+                                let i = n();
+                                edit(&|r| {
+                                    if let Some(t) = r.tracks.get_mut(i) {
+                                        t.title = text.to_owned();
+                                    }
+                                })
+                            }),
+                    )
+            },
+        ))))
+        .child(view().flex_row().justify_end().child({
+            let done = done.clone();
+            let blocked = complete;
+            button()
+                .px_4()
+                .py_2()
+                .rounded(move || theme().radius)
+                .bg(move || theme().primary)
+                .disabled(move || !blocked())
+                .opacity(move || if complete() { 1.0_f32 } else { 0.4 })
+                .active(|s| s.opacity(0.8))
+                .on_press(done)
+                .child(
+                    text(move || t!("editor.done")).text_color(move || theme().primary_foreground),
+                )
+        }))
 }
 
 fn track_list(rows: Signal<Vec<Row>>) -> impl IntoElement {
@@ -744,4 +969,37 @@ fn verdict_line(report: &RipReport) -> (Verdict, String) {
         }
     };
     (verdict, text)
+}
+
+/// A release with nothing known yet but the disc's tracks, for typing tags in.
+fn blank_release(disc: &Disc) -> Release {
+    let tracks = disc
+        .toc
+        .audio_tracks()
+        .map(|t| TrackMeta {
+            number: t.number as u32,
+            title: String::new(),
+            artist: String::new(),
+            artist_ids: Vec::new(),
+            track_id: String::new(),
+            recording_id: String::new(),
+            length_ms: None,
+        })
+        .collect();
+    Release {
+        id: String::new(),
+        release_group_id: None,
+        title: String::new(),
+        artist: String::new(),
+        artist_ids: Vec::new(),
+        date: None,
+        country: None,
+        label: None,
+        catalog_number: None,
+        barcode: None,
+        disc_number: 1,
+        disc_total: 1,
+        tracks,
+        exact: false,
+    }
 }
