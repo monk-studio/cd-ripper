@@ -13,7 +13,7 @@ use nsh_platform_windows as platform;
 fn main() -> impl std::process::Termination {
     env_logger::init();
     platform::run_app(
-        platform::AppSource::Rust(platform::Root::of::<cdr_app::App>()),
+        platform::AppSource::Rust(cdr_app::root()),
         platform::AppOptions {
             title: "CDR".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]

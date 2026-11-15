@@ -3,14 +3,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use cdr_app::backend::{Backend, Disc, RipRequest, set_backend};
+use cdr_app::backend::{AutoOpen, Backend, Disc, RipRequest, set_backend};
 use cdr_core::album::Event;
 use cdr_core::musicbrainz::{Release, TrackMeta};
 use cdr_core::offsets::OffsetSource;
 use cdr_core::report::{ArMatch, RipReport, TrackReport};
 use cdr_core::storage_keys;
 use cdr_core::toc::{Toc, Track};
-use nsh_engine::{EngineConfig, Root};
+use nsh_engine::EngineConfig;
 use nsh_testing::{Headless, MemoryStorage};
 
 /// The backend is global, so tests take turns.
@@ -75,7 +75,7 @@ struct Fake {
     /// The system refuses access to the disc.
     denied: AtomicBool,
     /// What the system opens on insert.
-    auto_open: Mutex<Option<String>>,
+    auto_open: Mutex<Option<AutoOpen>>,
 }
 
 impl Backend for Fake {
@@ -88,8 +88,8 @@ impl Backend for Fake {
         Ok(disc())
     }
 
-    fn app_opened_on_insert(&self) -> Option<String> {
-        self.auto_open.lock().unwrap().clone()
+    fn app_opened_on_insert(&self) -> Option<AutoOpen> {
+        *self.auto_open.lock().unwrap()
     }
 
     fn eject(&self, _disc: &Disc) -> anyhow::Result<()> {
@@ -164,8 +164,18 @@ fn start(storage: &[(&str, &str)]) -> Headless {
 }
 
 fn start_with(fake: Arc<Fake>, storage: &[(&str, &str)]) -> Headless {
+    start_in(fake, storage, None)
+}
+
+fn start_in(fake: Arc<Fake>, storage: &[(&str, &str)], locale: Option<&str>) -> Headless {
     set_backend(fake);
-    let mut config = EngineConfig::new(Root::of::<cdr_app::App>());
+    let mut config = EngineConfig::new(cdr_app::root());
+    // A user whose system language is `locale`: it leads their preferred languages.
+    if let Some(tag) = locale {
+        config.environment.locale = nsh_core::platform::Locale::parse(tag).unwrap();
+        config.environment.locale_settings.languages =
+            nsh_core::platform::Languages::parse([tag]).unwrap();
+    }
     config.storage = Some(MemoryStorage::new(
         storage.iter().map(|(k, v)| (k.to_string(), v.to_string())),
     ));
@@ -263,7 +273,7 @@ fn eject_after_ripping_waits_for_the_next_disc() {
 fn warns_while_music_opens_on_insert_until_fixed() {
     let _turn = serial();
     let fake = Arc::new(Fake::default());
-    *fake.auto_open.lock().unwrap() = Some("the Music app".into());
+    *fake.auto_open.lock().unwrap() = Some(AutoOpen::Music);
     let mut app = start_with(fake.clone(), &[]);
     app.wait_for("text:/macOS opens the Music app when you insert a CD/")
         .unwrap();
@@ -286,4 +296,22 @@ fn says_when_the_system_refuses_access_to_the_disc() {
     app.wait_for("text:/CDR isn't allowed to read discs/")
         .unwrap();
     assert!(app.shows("Insert an audio CD"));
+}
+
+#[test]
+fn speaks_chinese_when_the_system_does() {
+    let _turn = serial();
+    let lib = library();
+    let mut app = start_in(
+        Arc::new(Fake::default()),
+        &[(storage_keys::LIBRARY, &lib)],
+        Some("zh-CN"),
+    );
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    assert!(app.shows("每轨读取两遍"));
+    app.press("text:开始抓取").unwrap();
+    app.wait_for("text:完美：3 轨全部与 AccurateRip 一致")
+        .unwrap();
+    assert!(app.shows("✓ 准确（40）"));
+    assert!(app.shows("弹出"));
 }

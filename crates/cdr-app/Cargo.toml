@@ -13,6 +13,7 @@ license = "UNLICENSED"
 anyhow = "1"
 cdr-core = { path = "../cdr-core" }
 env_logger = "0.11"
+serde_json = "1"
 log = "0.4"
 nsh-base = "0.5.1"
 nsh-core = "0.5.1"

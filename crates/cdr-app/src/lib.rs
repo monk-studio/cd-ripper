@@ -8,16 +8,42 @@ pub mod backend;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use backend::{Disc, RipRequest, backend, is_access_denied};
+use backend::{AutoOpen, Disc, RipRequest, backend, is_access_denied};
 use cdr_core::album::{self, Event};
 use cdr_core::library::DEFAULT_TEMPLATE;
 use cdr_core::musicbrainz::{DiscToc, Release};
-use cdr_core::report::{TrackReport, Verdict, timestamp};
+use cdr_core::report::{RipReport, TrackReport, Verdict, timestamp};
 use cdr_core::storage_keys;
 use nsh_base::{button, progress, theme};
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
+
+/// The translations in `locales/`. `nsh run` and `nsh package` compile them
+/// in themselves; [`root`] does it for `cargo run` and the tests.
+const LOCALES: &str = include_str!("../locales/app.json");
+
+/// The app's root with its translations.
+pub fn root() -> nsh_core::element::Root {
+    nsh_core::element::Root::of::<App>().translations_json(&by_language(LOCALES))
+}
+
+/// rust-i18n's one-file layout (`{"key": {"en": …}}`) as the engine takes
+/// it (`{"en": {"key": …}}`).
+fn by_language(json: &str) -> String {
+    let keys: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(json).expect("locales/app.json");
+    let mut out: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
+        Default::default();
+    for (key, texts) in keys.iter().filter(|(k, _)| *k != "_version") {
+        for (lang, text) in texts.as_object().into_iter().flatten() {
+            out.entry(lang.clone())
+                .or_default()
+                .insert(key.clone(), text.clone());
+        }
+    }
+    serde_json::to_string(&out).unwrap()
+}
 
 #[native_module("cdr/native")]
 fn native(registry: &mut Registry) {
@@ -53,7 +79,7 @@ pub fn App() -> impl IntoElement {
     let library = signal(Storage::get_item(storage_keys::LIBRARY));
     let secure = signal(Storage::get_item(storage_keys::SECURE).as_deref() == Some("1"));
     // Another app the system opens on insert, which would read the disc too.
-    let auto_open = signal(None::<String>);
+    let auto_open = signal(None::<AutoOpen>);
     let access_denied = signal(false);
     let rows = signal(Vec::<Row>::new());
     let message = signal(None::<String>);
@@ -100,7 +126,7 @@ pub fn App() -> impl IntoElement {
     };
 
     let choose_folder = move || {
-        let picked = pick_paths(OpenDialog::folders().button_label("Use as Library"));
+        let picked = pick_paths(OpenDialog::folders().button_label(t!("library.use")));
         app.run(|| {
             spawn(async move {
                 if let Ok(Some(paths)) = picked.await
@@ -129,9 +155,9 @@ pub fn App() -> impl IntoElement {
             count,
         );
         if let Some(existing) = dests.iter().find(|p| p.exists()) {
-            message.set(Some(format!(
-                "Already in the library: {}",
-                existing.display()
+            message.set(Some(t!(
+                "rip.already_in_library",
+                path = existing.display()
             )));
             return;
         }
@@ -159,7 +185,8 @@ pub fn App() -> impl IntoElement {
                         Event::Progress { track, done, total } => rows.update(|rows| {
                             let row = &mut rows[track];
                             row.progress = done as f32 * 100.0 / total.max(1) as f32;
-                            row.status = format!("Reading {:.0}%", row.progress);
+                            row.status =
+                                t!("track.reading", percent = format!("{:.0}", row.progress));
                         }),
                         Event::TrackDone { track, report } => rows.update(|rows| {
                             let row = &mut rows[track];
@@ -172,7 +199,7 @@ pub fn App() -> impl IntoElement {
                 }
                 match work.await {
                     Ok(Ok(report)) => {
-                        let (verdict, text) = report.verdict();
+                        let (verdict, text) = verdict_line(&report);
                         phase.set(Phase::Done(verdict, text));
                     }
                     Ok(Err(e)) => phase.set(Phase::Failed(format!("{e:#}"))),
@@ -213,8 +240,10 @@ pub fn App() -> impl IntoElement {
                         message.set(None);
                         phase.set(Phase::NoDisc);
                     }
-                    Ok(Err(e)) => message.set(Some(format!("Couldn't eject: {e:#}"))),
-                    Err(e) => message.set(Some(format!("Couldn't eject: {e}"))),
+                    Ok(Err(e)) => {
+                        message.set(Some(t!("action.eject_failed", error = format!("{e:#}"))))
+                    }
+                    Err(e) => message.set(Some(t!("action.eject_failed", error = e))),
                 }
             })
         });
@@ -230,23 +259,37 @@ pub fn App() -> impl IntoElement {
         .flex_1()
         .bg(move || theme().background)
         .text_color(move || theme().foreground)
-        .child(auto_open_notice(auto_open, move || app.run(check_auto_open)))
+        .child(auto_open_notice(auto_open, move || {
+            app.run(check_auto_open)
+        }))
         .child(
-            when(move || phase.get() == Phase::NoDisc, move || {
-                view()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .child(text("Insert an audio CD").text_2xl().font_weight(FontWeight::SEMIBOLD))
-                    .child(text("CDR reads it, checks every track against AccurateRip and files it into your library.")
-                        .text_color(move || theme().muted_foreground))
-                    .child(when(move || access_denied.get(), move || {
-                        text("CDR isn't allowed to read discs. Allow it in System Settings › Privacy & Security › Files & Folders › CDR › Removable Volumes.")
-                            .text_center()
-                            .text_color(move || theme().destructive)
-                    }))
-            })
+            when(
+                move || phase.get() == Phase::NoDisc,
+                move || {
+                    view()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            text(move || t!("start.title"))
+                                .text_2xl()
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(
+                            text(move || t!("start.subtitle"))
+                                .text_color(move || theme().muted_foreground),
+                        )
+                        .child(when(
+                            move || access_denied.get(),
+                            move || {
+                                text(move || t!("start.access_denied"))
+                                    .text_center()
+                                    .text_color(move || theme().destructive)
+                            },
+                        ))
+                },
+            )
             .otherwise(move || {
                 view()
                     .flex_1()
@@ -255,10 +298,23 @@ pub fn App() -> impl IntoElement {
                     .child(header(disc, chosen))
                     .child(release_picker(disc, chosen, phase))
                     .child(track_list(rows))
-                    .child(when(move || message.get().is_some(), move || {
-                        text(move || message.get().unwrap_or_default()).text_color(move || theme().destructive)
-                    }))
-                    .child(footer(phase, library, secure, choose_folder, toggle_secure, start_rip, reveal, eject))
+                    .child(when(
+                        move || message.get().is_some(),
+                        move || {
+                            text(move || message.get().unwrap_or_default())
+                                .text_color(move || theme().destructive)
+                        },
+                    ))
+                    .child(footer(
+                        phase,
+                        library,
+                        secure,
+                        choose_folder,
+                        toggle_secure,
+                        start_rip,
+                        reveal,
+                        eject,
+                    ))
             }),
         )
 }
@@ -300,7 +356,7 @@ fn header(disc: Signal<Option<Disc>>, chosen: Signal<usize>) -> impl IntoElement
                     text(move || {
                         release()
                             .map(|r| r.title)
-                            .unwrap_or_else(|| "Unknown album".into())
+                            .unwrap_or_else(|| t!("album.unknown"))
                     })
                     .text_xl()
                     .font_weight(FontWeight::SEMIBOLD),
@@ -308,7 +364,7 @@ fn header(disc: Signal<Option<Disc>>, chosen: Signal<usize>) -> impl IntoElement
                 .child(text(move || {
                     release()
                         .map(|r| r.artist)
-                        .unwrap_or_else(|| "Not found on MusicBrainz".into())
+                        .unwrap_or_else(|| t!("album.not_found"))
                 }))
                 .child(
                     text(move || release().map(|r| details(&r)).unwrap_or_default())
@@ -422,8 +478,8 @@ fn footer(
 ) -> impl IntoElement {
     let verdict_text = move || match phase.get() {
         Phase::Done(_, text) => text,
-        Phase::Failed(e) => format!("Rip failed: {e}"),
-        Phase::Ripping => "Ripping…".into(),
+        Phase::Failed(e) => t!("rip.failed", error = e),
+        Phase::Ripping => t!("rip.ripping"),
         _ => String::new(),
     };
     let verdict_color = move || match phase.get() {
@@ -448,7 +504,7 @@ fn footer(
                         .text_color(verdict_color),
                 )
                 .child(checkbox_button(
-                    "Read every track twice",
+                    "setting.secure",
                     secure,
                     move || phase.get() == Phase::Ripping,
                     toggle_secure,
@@ -460,30 +516,26 @@ fn footer(
                 .items_center()
                 .gap_3()
                 .child(
-                    text(move || {
-                        library
-                            .get()
-                            .unwrap_or_else(|| "No library folder chosen".into())
-                    })
-                    .flex_1()
-                    .text_sm()
-                    .number_of_lines(1)
-                    .text_color(move || theme().muted_foreground),
+                    text(move || library.get().unwrap_or_else(|| t!("library.none")))
+                        .flex_1()
+                        .text_sm()
+                        .number_of_lines(1)
+                        .text_color(move || theme().muted_foreground),
                 )
                 .child(secondary_button(
-                    "Choose Library…",
+                    "library.choose",
                     move || phase.get() == Phase::Ripping,
                     choose_folder,
                 ))
                 .child(when(move || matches!(phase.get(), Phase::Done(..)), {
                     let reveal = reveal.clone();
-                    move || secondary_button("Show in Finder", || false, reveal.clone())
+                    move || secondary_button("action.show_in_finder", || false, reveal.clone())
                 }))
                 .child(when(
                     move || matches!(phase.get(), Phase::Done(..) | Phase::Failed(_)),
                     {
                         let eject = eject.clone();
-                        move || secondary_button("Eject", || false, eject.clone())
+                        move || secondary_button("action.eject", || false, eject.clone())
                     },
                 ))
                 .child(when(move || phase.get() == Phase::Ready, {
@@ -506,7 +558,7 @@ fn footer(
                             .active(|s| s.opacity(0.8))
                             .on_press(start_rip)
                             .child(
-                                text("Rip")
+                                text(move || t!("action.rip"))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(move || theme().primary_foreground),
                             )
@@ -518,33 +570,34 @@ fn footer(
 /// Shown while the system opens another app on insert: it would read the
 /// disc at the same time and slow ripping down.
 fn auto_open_notice(
-    auto_open: Signal<Option<String>>,
+    auto_open: Signal<Option<AutoOpen>>,
     check_again: impl Fn() + Clone + 'static,
 ) -> impl IntoElement {
     when(
         move || auto_open.get().is_some(),
         move || {
             view()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .mx_6()
-            .mt_4()
-            .p_3()
-            .rounded(move || theme().radius)
-            .bg(move || theme().muted)
-            .child(
-                text(move || {
-                    format!(
-                        "macOS opens {} when you insert a CD, and it reads the disc at the same time as CDR. \
-                         In System Settings › CDs & DVDs, set “When you insert a music CD” to Ignore.",
-                        auto_open.get().unwrap_or_default()
-                    )
-                })
-                .flex_1()
-                .text_sm(),
-            )
-            .child(secondary_button("Check again", || false, check_again.clone()))
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .mx_6()
+                .mt_4()
+                .p_3()
+                .rounded(move || theme().radius)
+                .bg(move || theme().muted)
+                .child(
+                    text(move || match auto_open.get() {
+                        Some(AutoOpen::OtherApp) => t!("notice.auto_open_other"),
+                        _ => t!("notice.auto_open_music"),
+                    })
+                    .flex_1()
+                    .text_sm(),
+                )
+                .child(secondary_button(
+                    "notice.check_again",
+                    || false,
+                    check_again.clone(),
+                ))
         },
     )
 }
@@ -592,7 +645,7 @@ fn checkbox_button(
                         .text_color(move || theme().primary_foreground),
                 ),
         )
-        .child(text(label).text_sm())
+        .child(text(move || t!(label)).text_sm())
 }
 
 fn secondary_button(
@@ -611,7 +664,7 @@ fn secondary_button(
         .opacity(move || if dimmed() { 0.4_f32 } else { 1.0 })
         .active(|s| s.opacity(0.7))
         .on_press(on_press)
-        .child(text(label))
+        .child(text(move || t!(label)))
 }
 
 fn rows_for(disc: &Disc, release: Option<&Release>) -> Vec<Row> {
@@ -631,7 +684,7 @@ fn rows_for(disc: &Disc, release: Option<&Release>) -> Vec<Row> {
                 number: t.number,
                 title: meta
                     .map(|m| m.title.clone())
-                    .unwrap_or_else(|| format!("Track {}", t.number)),
+                    .unwrap_or_else(|| t!("track.untitled", n = t.number)),
                 artist: meta.map(|m| m.artist.clone()).unwrap_or_default(),
                 length: timestamp((disc.toc.track_end(i) - t.start) as usize)
                     .trim()
@@ -659,8 +712,36 @@ fn details(r: &Release) -> String {
 
 fn status(t: &TrackReport) -> String {
     match (t.accuraterip, t.suspicious.is_empty()) {
-        (Some(m), _) => format!("✓ Accurate ({})", m.confidence),
-        (None, true) => "✓ Read the same twice".into(),
-        (None, false) => format!("⚠ Check at {}", t.suspicious[0].trim()),
+        (Some(m), _) if m.pressing_offset.is_some() => {
+            t!("track.accurate_other_pressing", confidence = m.confidence)
+        }
+        (Some(m), _) => t!("track.accurate", confidence = m.confidence),
+        (None, true) => t!("track.secure"),
+        (None, false) => t!("track.check", position = t.suspicious[0].trim()),
     }
+}
+
+/// The disc's verdict in the app's language ([`RipReport::verdict`] decides it).
+fn verdict_line(report: &RipReport) -> (Verdict, String) {
+    let total = report.tracks.len();
+    let accurate = report
+        .tracks
+        .iter()
+        .filter(|t| t.accuraterip.is_some())
+        .count();
+    let verdict = report.verdict().0;
+    let text = match verdict {
+        Verdict::Perfect => t!("verdict.perfect", total = total),
+        Verdict::Verified => t!("verdict.verified", accurate = accurate, total = total),
+        Verdict::Check => {
+            let tracks: Vec<String> = report
+                .tracks
+                .iter()
+                .filter(|t| !t.suspicious.is_empty())
+                .map(|t| t.number.to_string())
+                .collect();
+            t!("verdict.check", tracks = tracks.join(", "))
+        }
+    };
+    (verdict, text)
 }

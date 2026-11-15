@@ -46,7 +46,14 @@ pub trait Backend: Send + Sync {
 
     /// The app the system opens when a music CD goes in, if any. It reads the
     /// disc at the same time as CDR and slows ripping down. Blocking.
-    fn app_opened_on_insert(&self) -> Option<String>;
+    fn app_opened_on_insert(&self) -> Option<AutoOpen>;
+}
+
+/// What the system opens when a music CD goes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoOpen {
+    Music,
+    OtherApp,
 }
 
 /// Whether `e` is the system refusing access to the disc (on macOS, until the
@@ -110,7 +117,7 @@ impl Backend for Real {
         anyhow::bail!("can't eject {} on this platform yet", disc.device)
     }
 
-    fn app_opened_on_insert(&self) -> Option<String> {
+    fn app_opened_on_insert(&self) -> Option<AutoOpen> {
         #[cfg(target_os = "macos")]
         {
             // System Settings › CDs & DVDs › "When you insert a music CD".
@@ -126,8 +133,8 @@ impl Backend for Real {
             let action = digihub_action(&String::from_utf8_lossy(&out.stdout));
             match action {
                 Some(1) => None,
-                Some(100 | 101) | None => Some("the Music app".into()),
-                Some(_) => Some("another app".into()),
+                Some(100 | 101) | None => Some(AutoOpen::Music),
+                Some(_) => Some(AutoOpen::OtherApp),
             }
         }
         #[cfg(not(target_os = "macos"))]
