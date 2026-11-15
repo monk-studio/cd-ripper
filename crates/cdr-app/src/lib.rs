@@ -4,17 +4,20 @@
 //! app goes through [`backend::Backend`], so tests can run it headless.
 
 pub mod backend;
+mod look;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use backend::{AutoOpen, Disc, RipRequest, backend, is_access_denied};
 use cdr_core::album::{self, Event};
 use cdr_core::library::DEFAULT_TEMPLATE;
 use cdr_core::musicbrainz::{DiscToc, Release, TrackMeta};
-use cdr_core::report::{RipReport, TrackReport, Verdict, timestamp};
+use cdr_core::offsets::OffsetSource;
+use cdr_core::report::{RipReport, TrackReport, Verdict};
 use cdr_core::storage_keys;
-use nsh_base::{button, progress, theme};
+use look::{color, icon, icon_with, icons};
+use nsh_base::{button, progress};
 use nsh_core::element::input;
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
@@ -56,7 +59,9 @@ enum Phase {
     NoDisc,
     Ready,
     Ripping,
-    Done(Verdict, String),
+    /// The verdict, what it means for this disc, and how the rip went
+    /// (time and speed).
+    Done(Verdict, String, String),
     Failed(String),
 }
 
@@ -64,11 +69,15 @@ enum Phase {
 struct Row {
     number: u8,
     title: String,
+    /// Shown only when it isn't the album artist.
     artist: String,
     length: String,
+    sectors: u32,
     /// 0–100 while reading.
     progress: f32,
     status: String,
+    /// The track read well (AccurateRip or two agreeing reads).
+    good: bool,
     done: bool,
 }
 
@@ -77,6 +86,7 @@ pub fn App() -> impl IntoElement {
     let phase = signal(Phase::NoDisc);
     let disc = signal(None::<Disc>);
     let chosen = signal(0_usize);
+    let picking = signal(false);
     let library = signal(Storage::get_item(storage_keys::LIBRARY));
     let secure = signal(Storage::get_item(storage_keys::SECURE).as_deref() == Some("1"));
     // Another app the system opens on insert, which would read the disc too.
@@ -87,6 +97,8 @@ pub fn App() -> impl IntoElement {
     let editing = signal(None::<Release>);
     let rows = signal(Vec::<Row>::new());
     let message = signal(None::<String>);
+    let offset_line = signal(String::new());
+    let started = signal(None::<Instant>);
     // Tasks live as long as the UI they were started in. Handlers run inside
     // buttons that come and go (Rip disappears once ripping starts), so the
     // tasks they start belong to the app instead.
@@ -113,6 +125,7 @@ pub fn App() -> impl IntoElement {
                         access_denied.set(false);
                         rows.set(rows_for(&found, found.releases.first()));
                         chosen.set(0);
+                        picking.set(false);
                         edited.set(None);
                         editing.set(None);
                         disc.set(Some(found));
@@ -140,10 +153,12 @@ pub fn App() -> impl IntoElement {
     let choose_release = move |i: usize| {
         chosen.set(i);
         edited.set(None);
+        picking.set(false);
         show_release();
     };
     let start_editing = move || {
         let Some(d) = disc.get() else { return };
+        picking.set(false);
         editing.set(Some(release().unwrap_or_else(|| blank_release(&d))));
     };
     let finish_editing = move || {
@@ -162,6 +177,26 @@ pub fn App() -> impl IntoElement {
         show_release();
     };
 
+    // Where this disc's tracks go under the library.
+    let destinations = move || {
+        let root = library.get()?;
+        let d = disc.get()?;
+        let release = release();
+        let disc_id = DiscToc::from_toc(&d.toc).disc_id();
+        let count = d.toc.audio_tracks().count();
+        Some(album::destinations(
+            Some(&PathBuf::from(root)),
+            DEFAULT_TEMPLATE,
+            release.as_ref(),
+            &disc_id,
+            count,
+        ))
+    };
+    let album_folder = move || {
+        destinations()
+            .and_then(|(_, dests)| dests.first().and_then(|p| p.parent()).map(display_path))
+    };
+
     let choose_folder = move || {
         let picked = pick_paths(OpenDialog::folders().button_label(t!("library.use")));
         app.run(|| {
@@ -178,19 +213,10 @@ pub fn App() -> impl IntoElement {
     };
 
     let start_rip = move || {
-        let (Some(d), Some(root)) = (disc.get(), library.get()) else {
+        let (Some(d), Some((tags, dests))) = (disc.get(), destinations()) else {
             return;
         };
         let release = release();
-        let disc_id = DiscToc::from_toc(&d.toc).disc_id();
-        let count = d.toc.audio_tracks().count();
-        let (tags, dests) = album::destinations(
-            Some(&PathBuf::from(&root)),
-            DEFAULT_TEMPLATE,
-            release.as_ref(),
-            &disc_id,
-            count,
-        );
         if let Some(existing) = dests.iter().find(|p| p.exists()) {
             message.set(Some(t!(
                 "rip.already_in_library",
@@ -199,7 +225,10 @@ pub fn App() -> impl IntoElement {
             return;
         }
         message.set(None);
+        picking.set(false);
+        offset_line.set(String::new());
         rows.set(rows_for(&d, release.as_ref()));
+        started.set(Some(Instant::now()));
         phase.set(Phase::Ripping);
 
         let secure_now = secure.get();
@@ -219,6 +248,11 @@ pub fn App() -> impl IntoElement {
             spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event {
+                        Event::Offset { offset, source, .. } => offset_line.set(t!(
+                            "rip.offset",
+                            offset = format!("{offset:+}"),
+                            source = t!(offset_source_key(source))
+                        )),
                         Event::Progress { track, done, total } => rows.update(|rows| {
                             let row = &mut rows[track];
                             row.progress = done as f32 * 100.0 / total.max(1) as f32;
@@ -229,6 +263,7 @@ pub fn App() -> impl IntoElement {
                             let row = &mut rows[track];
                             row.progress = 100.0;
                             row.status = status(&report);
+                            row.good = report.accuraterip.is_some() || report.suspicious.is_empty();
                             row.done = true;
                         }),
                         _ => {}
@@ -237,7 +272,9 @@ pub fn App() -> impl IntoElement {
                 match work.await {
                     Ok(Ok(report)) => {
                         let (verdict, text) = verdict_line(&report);
-                        phase.set(Phase::Done(verdict, text));
+                        let took = started.get().map(|s| s.elapsed()).unwrap_or_default();
+                        let sectors: u32 = rows.get().iter().map(|r| r.sectors).sum();
+                        phase.set(Phase::Done(verdict, text, how_it_went(took, sectors)));
                     }
                     Ok(Err(e)) => phase.set(Phase::Failed(format!("{e:#}"))),
                     Err(e) => phase.set(Phase::Failed(e.to_string())),
@@ -247,19 +284,9 @@ pub fn App() -> impl IntoElement {
     };
 
     let reveal = move || {
-        let Some(root) = library.get() else { return };
-        let Some(d) = disc.get() else { return };
-        let release = release();
-        let disc_id = DiscToc::from_toc(&d.toc).disc_id();
-        let count = d.toc.audio_tracks().count();
-        let (_, dests) = album::destinations(
-            Some(&PathBuf::from(root)),
-            DEFAULT_TEMPLATE,
-            release.as_ref(),
-            &disc_id,
-            count,
-        );
-        if let Some(first) = dests.first() {
+        if let Some((_, dests)) = destinations()
+            && let Some(first) = dests.first()
+        {
             // Fire and forget: it opens Finder or fails quietly.
             drop(reveal_path(first.clone()));
         }
@@ -275,6 +302,8 @@ pub fn App() -> impl IntoElement {
                         disc.set(None);
                         rows.set(Vec::new());
                         message.set(None);
+                        editing.set(None);
+                        picking.set(false);
                         phase.set(Phase::NoDisc);
                     }
                     Ok(Err(e)) => {
@@ -292,219 +321,521 @@ pub fn App() -> impl IntoElement {
         secure.set(on);
     };
 
+    let releases = move || disc.get().map(|d| d.releases).unwrap_or_default();
+
     view()
         .flex_1()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
+        .bg(color::WINDOW)
+        .text_color(color::TEXT)
+        .text_size(px(13.0))
+        // Above every screen: it matters most while ripping.
         .child(auto_open_notice(auto_open, move || {
             app.run(check_auto_open)
         }))
         .child(
             when(
                 move || phase.get() == Phase::NoDisc,
-                move || {
-                    view()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .gap_2()
-                        .child(
-                            text(move || t!("start.title"))
-                                .text_2xl()
-                                .font_weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(
-                            text(move || t!("start.subtitle"))
-                                .text_color(move || theme().muted_foreground),
-                        )
-                        .child(when(
-                            move || access_denied.get(),
-                            move || {
-                                text(move || t!("start.access_denied"))
-                                    .text_center()
-                                    .text_color(move || theme().destructive)
-                            },
-                        ))
-                },
+                move || waiting(library, access_denied),
             )
             .otherwise(move || {
                 view()
                     .flex_1()
-                    .p_6()
-                    .gap_4()
-                    .child(header(
-                        release,
-                        move || phase.get() == Phase::Ready && editing.get().is_none(),
-                        start_editing,
-                    ))
+                    .child(verdict_banner(phase))
+                    .child(
+                        when(
+                            move || phase.get() == Phase::Ready,
+                            move || {
+                                album_header(
+                                    release,
+                                    releases,
+                                    chosen,
+                                    picking,
+                                    move || editing.get().is_none(),
+                                    start_editing,
+                                )
+                            },
+                        )
+                        .otherwise(move || progress_header(release, phase, rows, started)),
+                    )
                     .child(
                         when(
                             move || editing.get().is_some(),
                             move || tag_editor(editing, finish_editing),
                         )
                         .otherwise(move || {
-                            view()
-                                .flex_1()
-                                .gap_4()
-                                .child(release_picker(disc, chosen, phase, choose_release))
-                                .child(track_list(rows))
+                            when(
+                                move || picking.get(),
+                                move || release_picker(releases, chosen, choose_release),
+                            )
+                            .otherwise(move || track_list(rows, phase))
                         }),
                     )
                     .child(when(
                         move || message.get().is_some(),
                         move || {
                             text(move || message.get().unwrap_or_default())
-                                .text_color(move || theme().destructive)
+                                .px(px(24.0))
+                                .py(px(8.0))
+                                .text_size(px(12.0))
+                                .text_color(color::BAD)
                         },
                     ))
                     .child(footer(
                         phase,
                         library,
                         secure,
-                        choose_folder,
-                        toggle_secure,
-                        start_rip,
-                        reveal,
-                        eject,
+                        album_folder,
+                        offset_line,
+                        Actions {
+                            choose_folder,
+                            toggle_secure,
+                            start_rip,
+                            reveal,
+                            eject,
+                        },
                     ))
             }),
         )
 }
 
-fn header(
+/// No disc yet: what to do, and where the albums will go.
+fn waiting(library: Signal<Option<String>>, access_denied: Signal<bool>) -> impl IntoElement {
+    view()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap(px(14.0))
+        .p(px(24.0))
+        .child(icon(icons::DISC, 104.0).text_color(color::MUTED))
+        .child(
+            text(move || t!("start.title"))
+                .text_size(px(22.0))
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+        .child(
+            text(move || t!("start.subtitle"))
+                .max_w(px(420.0))
+                .text_center()
+                .text_size(px(14.0))
+                .text_color(color::MUTED),
+        )
+        .child(when(
+            move || access_denied.get(),
+            move || {
+                text(move || t!("start.access_denied"))
+                    .max_w(px(480.0))
+                    .text_center()
+                    .text_color(color::BAD)
+            },
+        ))
+        .child(
+            view()
+                .mt(px(10.0))
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon(icons::FOLDER, 13.0).text_color(color::MUTED))
+                .child(
+                    text(move || {
+                        library
+                            .get()
+                            .map(|l| t!("start.library", path = display_path(l.as_ref())))
+                            .unwrap_or_else(|| t!("library.none"))
+                    })
+                    .text_size(px(12.0))
+                    .text_color(color::MUTED),
+                ),
+        )
+}
+
+fn cover_url(release: &Release) -> String {
+    format!(
+        "https://coverartarchive.org/release/{}/front-250",
+        release.id
+    )
+}
+
+/// The album's cover, or a plain square while there is none.
+fn cover(release: impl Fn() -> Option<Release> + Copy + 'static, size: f32) -> impl IntoElement {
+    view()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded(px(if size > 80.0 { 8.0 } else { 5.0 }))
+        .overflow_hidden()
+        .bg(color::STRIPE)
+        .border_1()
+        .border_color(color::BORDER)
+        .child(when(
+            move || release().is_some_and(|r| !r.id.is_empty()),
+            move || {
+                image(move || release().map(|r| cover_url(&r)).unwrap_or_default())
+                    .size_full()
+                    .object_fit(nsh_core::ResizeMode::Cover)
+            },
+        ))
+}
+
+/// Before ripping: the album, which release it is, and its tags.
+fn album_header(
     release: impl Fn() -> Option<Release> + Copy + 'static,
+    releases: impl Fn() -> Vec<Release> + Copy + 'static,
+    chosen: Signal<usize>,
+    picking: Signal<bool>,
     can_edit: impl Fn() -> bool + Copy + 'static,
     edit: impl Fn() + Clone + 'static,
 ) -> impl IntoElement {
-    let cover = move || {
-        release()
-            .filter(|r| !r.id.is_empty())
-            .map(|r| format!("https://coverartarchive.org/release/{}/front-250", r.id))
-            .unwrap_or_default()
-    };
+    let found = move || release().is_some_and(|r| !r.id.is_empty());
     view()
         .flex_row()
-        .gap_4()
-        .items_center()
-        .child(
-            view()
-                .size(px(96.0))
-                .rounded(px(8.0))
-                .overflow_hidden()
-                .bg(move || theme().muted)
-                .child(when(
-                    move || release().is_some_and(|r| !r.id.is_empty()),
-                    move || {
-                        image(cover)
-                            .size_full()
-                            .object_fit(nsh_core::ResizeMode::Cover)
-                    },
-                )),
-        )
+        .gap(px(20.0))
+        .px(px(24.0))
+        .pt(px(20.0))
+        .pb(px(18.0))
+        .border_b_1()
+        .border_color(color::BORDER)
+        .child(cover(release, 132.0))
         .child(
             view()
                 .flex_1()
-                .gap_1()
+                .min_w(px(0.0))
+                .child(
+                    text(move || {
+                        if found() {
+                            t!("album.found")
+                        } else {
+                            t!("album.not_found")
+                        }
+                    })
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(move || if found() { color::OK } else { color::WARN }),
+                )
                 .child(
                     text(move || {
                         release()
                             .map(|r| r.title)
+                            .filter(|t| !t.is_empty())
                             .unwrap_or_else(|| t!("album.unknown"))
                     })
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD),
+                    .mt(px(6.0))
+                    .number_of_lines(2)
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::BOLD),
                 )
-                .child(text(move || {
-                    release()
-                        .map(|r| r.artist)
-                        .unwrap_or_else(|| t!("album.not_found"))
-                }))
                 .child(
-                    text(move || release().map(|r| details(&r)).unwrap_or_default())
-                        .text_sm()
-                        .text_color(move || theme().muted_foreground),
+                    text(move || release().map(|r| r.artist).unwrap_or_default())
+                        .mt(px(2.0))
+                        .number_of_lines(1)
+                        .text_size(px(15.0))
+                        .text_color(color::MUTED),
+                )
+                .child(
+                    view()
+                        .mt(px(8.0))
+                        .flex_row()
+                        .gap(px(4.0))
+                        .child(
+                            text(move || release().map(|r| details(&r)).unwrap_or_default())
+                                .text_size(px(12.0))
+                                .text_color(color::MUTED),
+                        )
+                        .child(
+                            text(move || {
+                                let has_details =
+                                    release().is_some_and(|r| !details(&r).is_empty());
+                                let summary = release()
+                                    .map(|r| r.tracks.len())
+                                    .map(|n| t!("album.tracks", count = n))
+                                    .unwrap_or_default();
+                                match (has_details, summary.is_empty()) {
+                                    (true, false) => format!("· {summary}"),
+                                    _ => summary,
+                                }
+                            })
+                            .text_size(px(12.0))
+                            .text_color(color::MUTED),
+                        ),
+                )
+                .child(view().flex_1().min_h(px(12.0)))
+                .child(
+                    view()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .child(when(
+                            move || releases().len() > 1 && can_edit(),
+                            move || {
+                                small_button(
+                                    move || {
+                                        t!(
+                                            "release.n_of",
+                                            n = chosen.get() + 1,
+                                            total = releases().len()
+                                        )
+                                    },
+                                    Some(icons::CHEVRON),
+                                    move || picking.update(|p| *p = !*p),
+                                )
+                            },
+                        ))
+                        .child(when(can_edit, move || {
+                            small_button(
+                                move || {
+                                    if release().is_some() {
+                                        t!("album.edit")
+                                    } else {
+                                        t!("album.add_tags")
+                                    }
+                                },
+                                Some(icons::PENCIL),
+                                edit.clone(),
+                            )
+                        })),
                 ),
         )
-        .child(when(can_edit, move || {
-            let key = if release().is_some() {
-                "album.edit"
-            } else {
-                "album.add_tags"
-            };
-            secondary_button(key, || false, edit.clone())
-        }))
+}
+
+/// While ripping and after: a smaller header, with the album's progress.
+fn progress_header(
+    release: impl Fn() -> Option<Release> + Copy + 'static,
+    phase: Signal<Phase>,
+    rows: Signal<Vec<Row>>,
+    started: Signal<Option<Instant>>,
+) -> impl IntoElement {
+    let ripping = move || phase.get() == Phase::Ripping;
+    let fraction = move || {
+        let rows = rows.get();
+        let total: u32 = rows.iter().map(|r| r.sectors).sum();
+        let done: f32 = rows
+            .iter()
+            .map(|r| r.progress / 100.0 * r.sectors as f32)
+            .sum();
+        if total == 0 { 0.0 } else { done / total as f32 }
+    };
+    let position = move || {
+        let rows = rows.get();
+        let n = rows
+            .iter()
+            .position(|r| !r.done)
+            .unwrap_or(rows.len().saturating_sub(1));
+        t!(
+            "rip.position",
+            n = n + 1,
+            total = rows.len(),
+            percent = format!("{:.0}", fraction() * 100.0)
+        )
+    };
+    let left = move || {
+        let f = fraction();
+        let Some(start) = started.get() else {
+            return String::new();
+        };
+        let elapsed = start.elapsed().as_secs_f32();
+        if f < 0.02 || elapsed < 3.0 {
+            return String::new();
+        }
+        let sectors: u32 = rows.get().iter().map(|r| r.sectors).sum();
+        let speed = f * sectors as f32 / 75.0 / elapsed;
+        let minutes = (elapsed * (1.0 - f) / f / 60.0).round() as u32;
+        let left = if minutes < 1 {
+            t!("rip.under_a_minute")
+        } else {
+            t!("rip.minutes_left", minutes = minutes)
+        };
+        format!("{left} · {speed:.1}×")
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap(px(18.0))
+        .px(px(24.0))
+        .py(px(16.0))
+        .border_b_1()
+        .border_color(color::BORDER)
+        .child(cover(release, 64.0))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_baseline()
+                        .gap(px(10.0))
+                        .child(
+                            text(move || {
+                                release()
+                                    .map(|r| r.title)
+                                    .filter(|t| !t.is_empty())
+                                    .unwrap_or_else(|| t!("album.unknown"))
+                            })
+                            .number_of_lines(1)
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::BOLD),
+                        )
+                        .child(
+                            text(move || release().map(|r| r.artist).unwrap_or_default())
+                                .flex_1()
+                                .number_of_lines(1)
+                                .text_color(color::MUTED),
+                        ),
+                )
+                .child(when(ripping, move || {
+                    view()
+                        .child(
+                            progress()
+                                .mt(px(10.0))
+                                .value(move || fraction() * 100.0)
+                                .track_style(|s| s.h(px(6.0)).rounded(px(3.0)).bg(color::TRACK))
+                                .indicator_style(|s| {
+                                    s.h(px(6.0)).rounded(px(3.0)).bg(color::ACCENT)
+                                }),
+                        )
+                        .child(
+                            view()
+                                .mt(px(7.0))
+                                .flex_row()
+                                .child(
+                                    text(position)
+                                        .flex_1()
+                                        .text_size(px(12.0))
+                                        .tabular_nums()
+                                        .text_color(color::MUTED),
+                                )
+                                .child(
+                                    text(left)
+                                        .text_size(px(12.0))
+                                        .tabular_nums()
+                                        .text_color(color::MUTED),
+                                ),
+                        )
+                })),
+        )
+}
+
+/// After the rip: the verdict, big. Failures show here too.
+fn verdict_banner(phase: Signal<Phase>) -> impl IntoElement {
+    let kind = move || match phase.get() {
+        Phase::Done(Verdict::Perfect | Verdict::Verified, ..) => Some(true),
+        Phase::Done(Verdict::Check, ..) | Phase::Failed(_) => Some(false),
+        _ => None,
+    };
+    let good = move || kind() == Some(true);
+    when(
+        move || kind().is_some(),
+        move || {
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(16.0))
+                .mx(px(12.0))
+                .mt(px(16.0))
+                .mb(px(4.0))
+                .px(px(11.0))
+                .py(px(15.0))
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(move || {
+                    if good() {
+                        color::OK_BORDER
+                    } else {
+                        color::BAD_BORDER
+                    }
+                })
+                .bg(move || if good() { color::OK_BG } else { color::BAD_BG })
+                .child(
+                    view()
+                        .size(px(44.0))
+                        .flex_shrink_0()
+                        .rounded(px(22.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(move || if good() { color::OK } else { color::BAD })
+                        .child(
+                            icon_with(
+                                move || if good() { icons::CHECK } else { icons::ALERT },
+                                22.0,
+                            )
+                            .text_color(color::ON_COLOR),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .gap(px(3.0))
+                        .child(
+                            text(move || match phase.get() {
+                                Phase::Done(Verdict::Perfect, ..) => t!("verdict.perfect.title"),
+                                Phase::Done(Verdict::Verified, ..) => t!("verdict.verified.title"),
+                                Phase::Done(Verdict::Check, ..) => t!("verdict.check.title"),
+                                _ => t!("rip.failed.title"),
+                            })
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::BOLD),
+                        )
+                        .child(
+                            text(move || match phase.get() {
+                                Phase::Done(_, text, how) => format!("{text} · {how}"),
+                                Phase::Failed(e) => e,
+                                _ => String::new(),
+                            })
+                            .text_color(color::MUTED),
+                        ),
+                )
+        },
+    )
 }
 
 /// Only shown when MusicBrainz knows several releases with this disc: each
 /// with its cover and what tells pressings apart.
 fn release_picker(
-    disc: Signal<Option<Disc>>,
+    releases: impl Fn() -> Vec<Release> + Copy + 'static,
     chosen: Signal<usize>,
-    phase: Signal<Phase>,
     choose: impl Fn(usize) + Copy + 'static,
 ) -> impl IntoElement {
-    let options = move || disc.get().map(|d| d.releases).unwrap_or_default();
-    when(
-        move || options().len() > 1,
-        move || {
-            view().gap_2().child(each(
-                move || options().into_iter().enumerate().collect::<Vec<_>>(),
-                |(i, r)| (*i, r.id.clone()),
-                move |item, _| {
-                    let i = move || item.get().0;
-                    let cover = move || {
-                        format!(
-                            "https://coverartarchive.org/release/{}/front-250",
-                            item.get().1.id
-                        )
-                    };
-                    button()
-                        .flex_row()
-                        .items_center()
-                        .gap_3()
-                        .p_2()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(move || {
-                            if chosen.get() == i() {
-                                theme().primary
-                            } else {
-                                theme().border
-                            }
-                        })
-                        .selected(move || chosen.get() == i())
-                        .disabled(move || phase.get() != Phase::Ready)
-                        .on_press(move || choose(i()))
-                        .child(
-                            view()
-                                .size(px(40.0))
-                                .rounded(px(4.0))
-                                .overflow_hidden()
-                                .bg(move || theme().muted)
-                                .child(
-                                    image(cover)
-                                        .size_full()
-                                        .object_fit(nsh_core::ResizeMode::Cover),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .flex_1()
-                                .child(
-                                    text(move || item.get().1.title)
-                                        .text_sm()
-                                        .number_of_lines(1),
-                                )
-                                .child(
-                                    text(move || details(&item.get().1))
-                                        .text_xs()
-                                        .text_color(move || theme().muted_foreground),
-                                ),
-                        )
-                },
-            ))
-        },
-    )
+    scroll()
+        .flex_1()
+        .child(view().px(px(12.0)).py(px(8.0)).gap(px(4.0)).child(each(
+            move || releases().into_iter().enumerate().collect::<Vec<_>>(),
+            |(i, r)| (*i, r.id.clone()),
+            move |item, _| {
+                let i = move || item.get().0;
+                let this = move || Some(item.get().1);
+                button()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(move || {
+                        if chosen.get() == i() {
+                            color::CURRENT
+                        } else {
+                            color::TRANSPARENT
+                        }
+                    })
+                    .selected(move || chosen.get() == i())
+                    .active(|s| s.opacity(0.7))
+                    .on_press(move || choose(i()))
+                    .child(cover(this, 40.0))
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(
+                                text(move || item.get().1.title)
+                                    .number_of_lines(1)
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                text(move || details(&item.get().1))
+                                    .text_size(px(12.0))
+                                    .text_color(color::MUTED),
+                            ),
+                    )
+            },
+        )))
 }
 
 /// The album's and every track's tags, editable. Album and album artist are
@@ -525,6 +856,16 @@ fn tag_editor(
             .get()
             .is_some_and(|r| !r.title.trim().is_empty() && !r.artist.trim().is_empty())
     };
+    let field_input = || {
+        input()
+            .flex_1()
+            .h(px(28.0))
+            .px(px(8.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(color::BORDER)
+            .bg(color::FIELD)
+    };
     let field = move |key: &'static str,
                       id: &'static str,
                       value: fn(&Release) -> String,
@@ -532,29 +873,26 @@ fn tag_editor(
         view()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap(px(12.0))
             .child(
                 text(move || t!(key))
                     .w(px(110.0))
-                    .text_sm()
-                    .text_color(move || theme().muted_foreground),
+                    .text_right()
+                    .text_color(color::MUTED),
             )
             .child(
-                input()
+                field_input()
                     .test_id(id)
-                    .flex_1()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(move || theme().border)
                     .value(move || draft.get().map(|r| value(&r)).unwrap_or_default())
                     .on_change(move |text: &str| edit(&|r| set(r, text))),
             )
     };
     view()
         .flex_1()
-        .gap_2()
+        .gap(px(8.0))
+        .px(px(24.0))
+        .pt(px(16.0))
+        .pb(px(12.0))
         .child(field(
             "editor.album",
             "album-title",
@@ -573,223 +911,269 @@ fn tag_editor(
             |r| r.date.clone().unwrap_or_default(),
             |r, v| r.date = Some(v.trim().to_owned()).filter(|d| !d.is_empty()),
         ))
-        .child(scroll().flex_1().child(view().gap_1().child(each(
-            move || {
-                draft
-                    .get()
-                    .map(|r| r.tracks)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .enumerate()
-                    .collect::<Vec<_>>()
-            },
-            |(n, _)| *n,
-            move |item, _| {
-                let n = move || item.get().0;
+        .child(
+            scroll()
+                .flex_1()
+                .mt(px(8.0))
+                .child(view().gap(px(6.0)).child(each(
+                    move || {
+                        draft
+                            .get()
+                            .map(|r| r.tracks)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .enumerate()
+                            .collect::<Vec<_>>()
+                    },
+                    |(n, _)| *n,
+                    move |item, _| {
+                        let n = move || item.get().0;
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                text(move || item.get().1.number.to_string())
+                                    .w(px(110.0))
+                                    .text_right()
+                                    .tabular_nums()
+                                    .text_color(color::MUTED),
+                            )
+                            .child(
+                                field_input()
+                                    .test_id(&format!(
+                                        "track-title-{}",
+                                        item.get_untracked().1.number
+                                    ))
+                                    .placeholder(move || {
+                                        t!("track.untitled", n = item.get().1.number)
+                                    })
+                                    .value(move || item.get().1.title)
+                                    .on_change(move |text: &str| {
+                                        let i = n();
+                                        edit(&|r| {
+                                            if let Some(t) = r.tracks.get_mut(i) {
+                                                t.title = text.to_owned();
+                                            }
+                                        })
+                                    }),
+                            )
+                    },
+                ))),
+        )
+        .child(view().flex_row().justify_end().child(primary_button(
+            move || t!("editor.done"),
+            move || !complete(),
+            done.clone(),
+        )))
+}
+
+fn track_list(rows: Signal<Vec<Row>>, phase: Signal<Phase>) -> impl IntoElement {
+    scroll()
+        .flex_1()
+        .child(view().px(px(12.0)).py(px(6.0)).child(each(
+            move || rows.get(),
+            |r| r.number,
+            move |row, index| {
+                let current = move || {
+                    phase.get() == Phase::Ripping && !row.get().done && row.get().progress > 0.0
+                };
+                let pending = move || {
+                    phase.get() == Phase::Ripping && !row.get().done && row.get().progress == 0.0
+                };
                 view()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap(px(12.0))
+                    .h(px(30.0))
+                    .px(px(12.0))
+                    .rounded(px(6.0))
+                    .bg(move || {
+                        if current() {
+                            color::CURRENT
+                        } else if index.get() % 2 == 1 {
+                            color::STRIPE
+                        } else {
+                            color::TRANSPARENT
+                        }
+                    })
                     .child(
-                        text(move || format!("{:2}", item.get().1.number))
-                            .w(px(24.0))
-                            .text_color(move || theme().muted_foreground),
+                        text(move || row.get().number.to_string())
+                            .w(px(20.0))
+                            .text_right()
+                            .tabular_nums()
+                            .text_color(color::MUTED),
                     )
                     .child(
-                        input()
-                            .test_id(&format!("track-title-{}", item.get_untracked().1.number))
+                        view()
                             .flex_1()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(move || theme().border)
-                            .placeholder(move || t!("track.untitled", n = item.get().1.number))
-                            .value(move || item.get().1.title)
-                            .on_change(move |text: &str| {
-                                let i = n();
-                                edit(&|r| {
-                                    if let Some(t) = r.tracks.get_mut(i) {
-                                        t.title = text.to_owned();
-                                    }
-                                })
-                            }),
+                            .min_w(px(0.0))
+                            .flex_row()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .child(text(move || row.get().title).number_of_lines(1).text_color(
+                                move || {
+                                    if pending() { color::FAINT } else { color::TEXT }
+                                },
+                            ))
+                            .child(
+                                text(move || row.get().artist)
+                                    .flex_1()
+                                    .number_of_lines(1)
+                                    .text_size(px(12.0))
+                                    .text_color(color::MUTED),
+                            ),
+                    )
+                    .child(when(current, move || {
+                        progress()
+                            .w(px(120.0))
+                            .value(move || row.get().progress)
+                            .track_style(|s| s.h(px(4.0)).rounded(px(2.0)).bg(color::TRACK))
+                            .indicator_style(|s| s.h(px(4.0)).rounded(px(2.0)).bg(color::ACCENT))
+                    }))
+                    .child(when(
+                        move || !row.get().status.is_empty(),
+                        move || {
+                            let tint = move || {
+                                if !row.get().done {
+                                    color::ACCENT
+                                } else if row.get().good {
+                                    color::OK
+                                } else {
+                                    color::WARN
+                                }
+                            };
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(5.0))
+                                .child(when(
+                                    move || row.get().done,
+                                    move || {
+                                        icon_with(
+                                            move || {
+                                                if row.get().good {
+                                                    icons::CHECK
+                                                } else {
+                                                    icons::ALERT
+                                                }
+                                            },
+                                            12.0,
+                                        )
+                                        .text_color(tint)
+                                    },
+                                ))
+                                .child(
+                                    text(move || row.get().status)
+                                        .text_size(px(12.0))
+                                        .tabular_nums()
+                                        .text_color(tint),
+                                )
+                        },
+                    ))
+                    .child(
+                        text(move || row.get().length)
+                            .w(px(40.0))
+                            .text_right()
+                            .tabular_nums()
+                            .text_color(color::MUTED),
                     )
             },
-        ))))
-        .child(view().flex_row().justify_end().child({
-            let done = done.clone();
-            let blocked = complete;
-            button()
-                .px_4()
-                .py_2()
-                .rounded(move || theme().radius)
-                .bg(move || theme().primary)
-                .disabled(move || !blocked())
-                .opacity(move || if complete() { 1.0_f32 } else { 0.4 })
-                .active(|s| s.opacity(0.8))
-                .on_press(done)
-                .child(
-                    text(move || t!("editor.done")).text_color(move || theme().primary_foreground),
-                )
-        }))
+        )))
 }
 
-fn track_list(rows: Signal<Vec<Row>>) -> impl IntoElement {
-    scroll().flex_1().child(view().gap_1().child(each(
-        move || rows.get(),
-        |r| r.number,
-        move |row, _| {
-            view()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .py_1()
-                .child(
-                    text(move || format!("{:2}", row.get().number))
-                        .w(px(24.0))
-                        .text_color(move || theme().muted_foreground),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .child(text(move || row.get().title).number_of_lines(1))
-                        .child(
-                            text(move || row.get().artist)
-                                .text_sm()
-                                .number_of_lines(1)
-                                .text_color(move || theme().muted_foreground),
-                        ),
-                )
-                .child(
-                    text(move || row.get().length)
-                        .text_sm()
-                        .tabular_nums()
-                        .text_color(move || theme().muted_foreground),
-                )
-                .child(
-                    view()
-                        .w(px(220.0))
-                        .gap_1()
-                        .child(text(move || row.get().status).text_sm())
-                        .child(when(
-                            move || !row.get().done && row.get().progress > 0.0,
-                            move || {
-                                progress()
-                                    .value(move || row.get().progress)
-                                    .track_style(|s| {
-                                        s.h(px(4.0)).rounded(px(2.0)).bg(move || theme().muted)
-                                    })
-                                    .indicator_style(|s| {
-                                        s.h(px(4.0)).rounded(px(2.0)).bg(move || theme().primary)
-                                    })
-                            },
-                        )),
-                )
-        },
-    )))
+/// What the footer's buttons do.
+struct Actions<A, B, C, D, E> {
+    choose_folder: A,
+    toggle_secure: B,
+    start_rip: C,
+    reveal: D,
+    eject: E,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Where the album goes, and what to do next.
 fn footer(
     phase: Signal<Phase>,
     library: Signal<Option<String>>,
     secure: Signal<bool>,
-    choose_folder: impl Fn() + Clone + 'static,
-    toggle_secure: impl Fn() + Clone + 'static,
-    start_rip: impl Fn() + Clone + 'static,
-    reveal: impl Fn() + Clone + 'static,
-    eject: impl Fn() + Clone + 'static,
+    album_folder: impl Fn() -> Option<String> + Copy + 'static,
+    offset_line: Signal<String>,
+    actions: Actions<
+        impl Fn() + Clone + 'static,
+        impl Fn() + Clone + 'static,
+        impl Fn() + Clone + 'static,
+        impl Fn() + Clone + 'static,
+        impl Fn() + Clone + 'static,
+    >,
 ) -> impl IntoElement {
-    let verdict_text = move || match phase.get() {
-        Phase::Done(_, text) => text,
-        Phase::Failed(e) => t!("rip.failed", error = e),
-        Phase::Ripping => t!("rip.ripping"),
-        _ => String::new(),
-    };
-    let verdict_color = move || match phase.get() {
-        Phase::Done(Verdict::Check, _) | Phase::Failed(_) => theme().destructive,
-        Phase::Done(..) => theme().primary,
-        _ => theme().muted_foreground,
+    let Actions {
+        choose_folder,
+        toggle_secure,
+        start_rip,
+        reveal,
+        eject,
+    } = actions;
+    let ready = move || phase.get() == Phase::Ready;
+    let finished = move || matches!(phase.get(), Phase::Done(..) | Phase::Failed(_));
+    let place = move || match phase.get() {
+        Phase::Ripping => offset_line.get(),
+        Phase::Done(..) => album_folder()
+            .map(|p| t!("rip.saved_to", path = p))
+            .unwrap_or_default(),
+        _ => album_folder().unwrap_or_else(|| t!("library.none")),
     };
     view()
-        .gap_3()
-        .pt_3()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .h(px(60.0))
+        .flex_shrink_0()
+        .px(px(24.0))
         .border_t_1()
-        .border_color(move || theme().border)
+        .border_color(color::BORDER)
+        .bg(color::BAR)
+        .child(when(
+            move || phase.get() != Phase::Ripping,
+            move || icon(icons::FOLDER, 14.0).text_color(color::MUTED),
+        ))
         .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .child(
-                    text(verdict_text)
-                        .flex_1()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(verdict_color),
-                )
-                .child(checkbox_button(
-                    "setting.secure",
-                    secure,
-                    move || phase.get() == Phase::Ripping,
-                    toggle_secure,
-                )),
+            text(place)
+                .flex_1()
+                .min_w(px(0.0))
+                .number_of_lines(1)
+                .text_size(px(12.0))
+                .text_color(color::MUTED),
         )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .child(
-                    text(move || library.get().unwrap_or_else(|| t!("library.none")))
-                        .flex_1()
-                        .text_sm()
-                        .number_of_lines(1)
-                        .text_color(move || theme().muted_foreground),
+        .child(when(ready, {
+            let choose_folder = choose_folder.clone();
+            move || small_button(move || t!("library.choose"), None, choose_folder.clone())
+        }))
+        .child(when(ready, {
+            let toggle_secure = toggle_secure.clone();
+            move || checkbox_button("setting.secure", secure, toggle_secure.clone())
+        }))
+        .child(when(move || matches!(phase.get(), Phase::Done(..)), {
+            let reveal = reveal.clone();
+            move || secondary_button(move || t!("action.show_in_finder"), reveal.clone())
+        }))
+        .child(when(ready, {
+            let eject = eject.clone();
+            move || secondary_button(move || t!("action.eject"), eject.clone())
+        }))
+        .child(when(ready, {
+            let start_rip = start_rip.clone();
+            move || {
+                primary_button(
+                    move || t!("action.rip"),
+                    move || library.get().is_none(),
+                    start_rip.clone(),
                 )
-                .child(secondary_button(
-                    "library.choose",
-                    move || phase.get() == Phase::Ripping,
-                    choose_folder,
-                ))
-                .child(when(move || matches!(phase.get(), Phase::Done(..)), {
-                    let reveal = reveal.clone();
-                    move || secondary_button("action.show_in_finder", || false, reveal.clone())
-                }))
-                .child(when(
-                    move || matches!(phase.get(), Phase::Done(..) | Phase::Failed(_)),
-                    {
-                        let eject = eject.clone();
-                        move || secondary_button("action.eject", || false, eject.clone())
-                    },
-                ))
-                .child(when(move || phase.get() == Phase::Ready, {
-                    let start_rip = start_rip.clone();
-                    move || {
-                        let start_rip = start_rip.clone();
-                        button()
-                            .px_4()
-                            .py_2()
-                            .rounded(move || theme().radius)
-                            .bg(move || theme().primary)
-                            .disabled(move || library.get().is_none())
-                            .opacity(move || {
-                                if library.get().is_none() {
-                                    0.4_f32
-                                } else {
-                                    1.0
-                                }
-                            })
-                            .active(|s| s.opacity(0.8))
-                            .on_press(start_rip)
-                            .child(
-                                text(move || t!("action.rip"))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(move || theme().primary_foreground),
-                            )
-                    }
-                })),
-        )
+            }
+        }))
+        .child(when(finished, {
+            let eject = eject.clone();
+            move || primary_button(move || t!("action.eject"), || false, eject.clone())
+        }))
 }
 
 /// Shown while the system opens another app on insert: it would read the
@@ -804,23 +1188,27 @@ fn auto_open_notice(
             view()
                 .flex_row()
                 .items_center()
-                .gap_3()
-                .mx_6()
-                .mt_4()
-                .p_3()
-                .rounded(move || theme().radius)
-                .bg(move || theme().muted)
+                .gap(px(12.0))
+                .mx(px(12.0))
+                .mt(px(14.0))
+                .px(px(11.0))
+                .py(px(10.0))
+                .rounded(px(10.0))
+                .border_1()
+                .border_color(color::WARN_BORDER)
+                .bg(color::WARN_BG)
+                .child(icon(icons::ALERT, 18.0).text_color(color::WARN))
                 .child(
                     text(move || match auto_open.get() {
                         Some(AutoOpen::OtherApp) => t!("notice.auto_open_other"),
                         _ => t!("notice.auto_open_music"),
                     })
                     .flex_1()
-                    .text_sm(),
+                    .text_size(px(12.5)),
                 )
-                .child(secondary_button(
-                    "notice.check_again",
-                    || false,
+                .child(small_button(
+                    move || t!("notice.check_again"),
+                    None,
                     check_again.clone(),
                 ))
         },
@@ -831,17 +1219,13 @@ fn auto_open_notice(
 fn checkbox_button(
     label: &'static str,
     on: Signal<bool>,
-    disabled: impl Fn() -> bool + Clone + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let dimmed = disabled.clone();
     button()
         .flex_row()
         .items_center()
-        .gap_2()
+        .gap(px(7.0))
         .selected(move || on.get())
-        .disabled(disabled)
-        .opacity(move || if dimmed() { 0.4_f32 } else { 1.0 })
         .on_press(on_press)
         .child(
             view()
@@ -850,46 +1234,92 @@ fn checkbox_button(
                 .border_1()
                 .border_color(move || {
                     if on.get() {
-                        theme().primary
+                        color::ACCENT
                     } else {
-                        theme().border
+                        color::BORDER_STRONG
                     }
                 })
                 .bg(move || {
                     if on.get() {
-                        theme().primary
+                        color::ACCENT
                     } else {
-                        theme().background
+                        color::BUTTON
                     }
                 })
                 .items_center()
                 .justify_center()
-                .child(
-                    text(move || if on.get() { "✓" } else { "" })
-                        .text_xs()
-                        .text_color(move || theme().primary_foreground),
-                ),
+                .child(when(
+                    move || on.get(),
+                    || icon(icons::CHECK, 11.0).text_color(color::ON_COLOR),
+                )),
         )
-        .child(text(move || t!(label)).text_sm())
+        .child(text(move || t!(label)).text_size(px(12.5)))
+}
+
+/// A compact button in the header and notices, with an optional icon.
+fn small_button(
+    label: impl Fn() -> String + 'static,
+    with_icon: Option<&'static str>,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    button()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(28.0))
+        .px(px(10.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(color::BORDER_STRONG)
+        .bg(color::BUTTON)
+        .active(|s| s.opacity(0.7))
+        .on_press(on_press)
+        .child(when(
+            move || with_icon.is_some(),
+            move || icon(with_icon.unwrap_or_default(), 12.0).text_color(color::MUTED),
+        ))
+        .child(text(label).text_size(px(12.5)))
 }
 
 fn secondary_button(
-    label: &'static str,
+    label: impl Fn() -> String + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    button()
+        .h(px(32.0))
+        .px(px(14.0))
+        .justify_center()
+        .rounded(px(7.0))
+        .border_1()
+        .border_color(color::BORDER_STRONG)
+        .bg(color::BUTTON)
+        .active(|s| s.opacity(0.7))
+        .on_press(on_press)
+        .child(text(label))
+}
+
+/// The one thing to do next, in the accent color.
+fn primary_button(
+    label: impl Fn() -> String + 'static,
     disabled: impl Fn() -> bool + Clone + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     let dimmed = disabled.clone();
     button()
-        .px_3()
-        .py_2()
-        .rounded(move || theme().radius)
-        .border_1()
-        .border_color(move || theme().border)
+        .h(px(32.0))
+        .px(px(20.0))
+        .justify_center()
+        .rounded(px(7.0))
+        .bg(color::ACCENT)
         .disabled(disabled)
         .opacity(move || if dimmed() { 0.4_f32 } else { 1.0 })
-        .active(|s| s.opacity(0.7))
+        .active(|s| s.opacity(0.8))
         .on_press(on_press)
-        .child(text(move || t!(label)))
+        .child(
+            text(label)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color::ON_COLOR),
+        )
 }
 
 fn rows_for(disc: &Disc, release: Option<&Release>) -> Vec<Row> {
@@ -900,26 +1330,49 @@ fn rows_for(disc: &Disc, release: Option<&Release>) -> Vec<Row> {
         .enumerate()
         .filter(|(_, t)| t.is_audio)
         .collect();
+    let album_artist = release.map(|r| r.artist.as_str()).unwrap_or_default();
     audio
         .iter()
         .enumerate()
         .map(|(n, &(i, t))| {
             let meta = release.and_then(|r| r.tracks.get(n));
+            let sectors = disc.toc.track_end(i) - t.start;
             Row {
                 number: t.number,
                 title: meta
                     .map(|m| m.title.clone())
+                    .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| t!("track.untitled", n = t.number)),
-                artist: meta.map(|m| m.artist.clone()).unwrap_or_default(),
-                length: timestamp((disc.toc.track_end(i) - t.start) as usize)
-                    .trim()
-                    .to_owned(),
+                artist: meta
+                    .map(|m| m.artist.clone())
+                    .filter(|a| a != album_artist)
+                    .unwrap_or_default(),
+                length: minutes_seconds(sectors as usize),
+                sectors,
                 progress: 0.0,
                 status: String::new(),
+                good: false,
                 done: false,
             }
         })
         .collect()
+}
+
+/// `m:ss` of `sectors` of audio.
+fn minutes_seconds(sectors: usize) -> String {
+    let seconds = sectors / 75;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// `path` with the home folder as `~`.
+fn display_path(path: &std::path::Path) -> String {
+    let path = path.display().to_string();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path,
+    }
 }
 
 fn details(r: &Release) -> String {
@@ -933,6 +1386,27 @@ fn details(r: &Release) -> String {
     .flatten()
     .collect::<Vec<_>>()
     .join(" · ")
+}
+
+fn offset_source_key(source: OffsetSource) -> &'static str {
+    match source {
+        OffsetSource::Manual => "offset.manual",
+        OffsetSource::AccurateRipDrives => "offset.accuraterip",
+        OffsetSource::Learned => "offset.learned",
+        OffsetSource::ThisDisc => "offset.this_disc",
+    }
+}
+
+/// How long the rip took and how fast it read.
+fn how_it_went(took: Duration, sectors: u32) -> String {
+    let secs = took.as_secs();
+    let speed = sectors as f32 / 75.0 / took.as_secs_f32().max(0.001);
+    t!(
+        "rip.took",
+        minutes = secs / 60,
+        seconds = secs % 60,
+        speed = format!("{speed:.1}")
+    )
 }
 
 fn status(t: &TrackReport) -> String {

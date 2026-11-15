@@ -183,6 +183,11 @@ fn start_with(fake: Arc<Fake>, storage: &[(&str, &str)]) -> Headless {
 fn start_in(fake: Arc<Fake>, storage: &[(&str, &str)], locale: Option<&str>) -> Headless {
     set_backend(fake);
     let mut config = EngineConfig::new(cdr_app::root());
+    // The Mac window's size.
+    config.viewport = nsh_core::geometry::Size::new(
+        nsh_core::geometry::Points(860.0),
+        nsh_core::geometry::Points(640.0),
+    );
     // A user whose system language is `locale`: it leads their preferred languages.
     if let Some(tag) = locale {
         config.environment.locale = nsh_core::platform::Locale::parse(tag).unwrap();
@@ -202,7 +207,7 @@ fn shows_the_disc_and_needs_a_library_before_ripping() {
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
     assert!(app.shows("more than words"));
     assert!(app.shows("No library folder chosen"));
-    assert_eq!(app.screen().enabled("text:Rip"), Ok(false));
+    assert_eq!(app.screen().enabled("text:Rip CD"), Ok(false));
 }
 
 #[test]
@@ -211,14 +216,13 @@ fn rips_into_the_library_and_shows_the_verdict() {
     let library = std::env::temp_dir().join(format!("cdr-app-test-{}", std::process::id()));
     let mut app = start(&[(storage_keys::LIBRARY, library.to_str().unwrap())]);
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
-        .unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
     assert_eq!(
         app.screen()
             .texts()
             .iter()
-            .filter(|t| **t == "✓ Accurate (40)")
+            .filter(|t| **t == "Accurate (40)")
             .count(),
         3
     );
@@ -239,9 +243,8 @@ fn secure_mode_setting_reaches_the_rip() {
     let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
     app.press("text:Read every track twice").unwrap();
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
-        .unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
     assert!(fake.secure.load(Ordering::SeqCst));
 }
 
@@ -255,9 +258,8 @@ fn secure_mode_is_remembered() {
         &[(storage_keys::LIBRARY, &lib), (storage_keys::SECURE, "1")],
     );
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
-        .unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
     assert!(
         fake.secure.load(Ordering::SeqCst),
         "the stored setting applies without touching it"
@@ -271,8 +273,8 @@ fn eject_after_ripping_waits_for_the_next_disc() {
     let lib = library();
     let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Eject").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
     app.press("text:Eject").unwrap();
     app.wait_for("text:Insert an audio CD").unwrap();
     assert!(fake.ejected.load(Ordering::SeqCst));
@@ -323,9 +325,8 @@ fn speaks_chinese_when_the_system_does() {
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
     assert!(app.shows("每轨读取两遍"));
     app.press("text:开始抓取").unwrap();
-    app.wait_for("text:完美：3 轨全部与 AccurateRip 一致")
-        .unwrap();
-    assert!(app.shows("✓ 准确（40）"));
+    app.wait_for("text:完美抓取").unwrap();
+    assert!(app.shows("准确（40）"));
     assert!(app.shows("弹出"));
 }
 
@@ -351,20 +352,19 @@ fn several_releases_can_be_chosen_between() {
     let fake = Arc::new(Fake::default());
     *fake.releases.lock().unwrap() = Some(vec![disc().releases[0].clone(), taiwan_release()]);
     let mut app = start_with(fake, &[]);
-    app.wait_for("text:2023-12-06 · TW · Universal · X-1")
-        .unwrap();
     // The header shows the first release; the picker lists both.
+    app.wait_for("text:Release 1 of 2").unwrap();
     let jp = "text:2023-12-06 · JP · F.C.L.S. · KSCL-3482";
     let tw = "text:2023-12-06 · TW · Universal · X-1";
+    assert_eq!(app.screen().count(tw), Ok(0));
+    app.press("text:Release 1 of 2").unwrap();
+    app.wait_for(tw).unwrap();
     assert_eq!(app.screen().count(jp), Ok(2));
     app.press(tw).unwrap();
-    app.wait_until(
-        "the header follows the choice",
-        std::time::Duration::from_secs(5),
-        |screen| screen.count(tw) == Ok(2),
-    )
-    .unwrap();
-    assert_eq!(app.screen().count(jp), Ok(1));
+    app.wait_for("text:Release 2 of 2").unwrap();
+    // The picker closes and the header follows the choice.
+    assert_eq!(app.screen().count(tw), Ok(1));
+    assert_eq!(app.screen().count(jp), Ok(0));
 }
 
 #[test]
@@ -388,9 +388,8 @@ fn unknown_disc_gets_tags_typed_in() {
     app.press("text:Done").unwrap();
     app.wait_for("text:Live Tape").unwrap();
     assert!(app.shows("Intro"));
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
-        .unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
 
     let ripped = fake.ripped.lock().unwrap();
     let request = ripped.as_ref().unwrap();
@@ -420,9 +419,8 @@ fn edits_to_a_known_release_keep_its_musicbrainz_ids() {
         .unwrap();
     app.press("text:Done").unwrap();
     app.wait_for("text:more than words (live)").unwrap();
-    app.press("text:Rip").unwrap();
-    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
-        .unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
 
     let ripped = fake.ripped.lock().unwrap();
     let request = ripped.as_ref().unwrap();

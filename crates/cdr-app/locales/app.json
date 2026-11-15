@@ -41,40 +41,32 @@
     "zh-CN": "读取中 %{percent}%"
   },
   "track.accurate": {
-    "en": "✓ Accurate (%{confidence})",
-    "zh-CN": "✓ 准确（%{confidence}）"
+    "en": "Accurate (%{confidence})",
+    "zh-CN": "准确（%{confidence}）"
   },
   "track.accurate_other_pressing": {
-    "en": "✓ Accurate (%{confidence}, other pressing)",
-    "zh-CN": "✓ 准确（%{confidence}，其他压制版本）"
+    "en": "Accurate (%{confidence}, other pressing)",
+    "zh-CN": "准确（%{confidence}，其他压制版本）"
   },
   "track.secure": {
-    "en": "✓ Read the same twice",
-    "zh-CN": "✓ 两次读取一致"
+    "en": "Read the same twice",
+    "zh-CN": "两次读取一致"
   },
   "track.check": {
-    "en": "⚠ Check at %{position}",
-    "zh-CN": "⚠ 请检查 %{position}"
+    "en": "Check at %{position}",
+    "zh-CN": "请检查 %{position}"
   },
   "verdict.perfect": {
-    "en": "Perfect: all %{total} tracks match AccurateRip",
-    "zh-CN": "完美：%{total} 轨全部与 AccurateRip 一致"
+    "en": "All %{total} tracks match AccurateRip",
+    "zh-CN": "%{total} 轨全部与 AccurateRip 一致"
   },
   "verdict.verified": {
-    "en": "Verified: %{accurate} of %{total} tracks match AccurateRip, the rest read the same twice",
-    "zh-CN": "已校验：%{total} 轨中 %{accurate} 轨与 AccurateRip 一致，其余两次读取一致"
+    "en": "%{accurate} of %{total} tracks match AccurateRip, the rest read the same twice",
+    "zh-CN": "%{total} 轨中 %{accurate} 轨与 AccurateRip 一致，其余两次读取一致"
   },
   "verdict.check": {
-    "en": "Check tracks %{tracks}: reads didn't agree in places",
-    "zh-CN": "请检查第 %{tracks} 轨：部分位置读取不一致"
-  },
-  "rip.ripping": {
-    "en": "Ripping…",
-    "zh-CN": "抓取中…"
-  },
-  "rip.failed": {
-    "en": "Rip failed: %{error}",
-    "zh-CN": "抓取失败：%{error}"
+    "en": "Reads didn't agree in places on tracks %{tracks}",
+    "zh-CN": "第 %{tracks} 轨部分位置读取不一致"
   },
   "rip.already_in_library": {
     "en": "Already in the library: %{path}",
@@ -93,7 +85,7 @@
     "zh-CN": "用作曲库"
   },
   "action.rip": {
-    "en": "Rip",
+    "en": "Rip CD",
     "zh-CN": "开始抓取"
   },
   "action.show_in_finder": {
@@ -135,5 +127,77 @@
   "editor.done": {
     "en": "Done",
     "zh-CN": "完成"
+  },
+  "album.found": {
+    "en": "Found on MusicBrainz",
+    "zh-CN": "已在 MusicBrainz 找到"
+  },
+  "album.tracks": {
+    "en": "%{count} tracks",
+    "zh-CN": "%{count} 轨"
+  },
+  "release.n_of": {
+    "en": "Release %{n} of %{total}",
+    "zh-CN": "版本 %{n}/%{total}"
+  },
+  "start.library": {
+    "en": "Library: %{path}",
+    "zh-CN": "曲库：%{path}"
+  },
+  "rip.position": {
+    "en": "Track %{n} of %{total} · %{percent}%",
+    "zh-CN": "第 %{n}/%{total} 轨 · %{percent}%"
+  },
+  "rip.under_a_minute": {
+    "en": "Less than a minute left",
+    "zh-CN": "不到一分钟"
+  },
+  "rip.minutes_left": {
+    "en": "About %{minutes} min left",
+    "zh-CN": "约剩 %{minutes} 分钟"
+  },
+  "rip.offset": {
+    "en": "Drive offset %{offset} (%{source})",
+    "zh-CN": "光驱偏移 %{offset}（%{source}）"
+  },
+  "offset.manual": {
+    "en": "set by hand",
+    "zh-CN": "手动设定"
+  },
+  "offset.accuraterip": {
+    "en": "AccurateRip drive list",
+    "zh-CN": "AccurateRip 光驱列表"
+  },
+  "offset.learned": {
+    "en": "learned from earlier discs",
+    "zh-CN": "从之前的光盘得出"
+  },
+  "offset.this_disc": {
+    "en": "from this disc only",
+    "zh-CN": "仅根据这张光盘"
+  },
+  "rip.saved_to": {
+    "en": "Saved to %{path}",
+    "zh-CN": "已存到 %{path}"
+  },
+  "rip.took": {
+    "en": "%{minutes} min %{seconds} s · %{speed}×",
+    "zh-CN": "用时 %{minutes} 分 %{seconds} 秒 · %{speed}×"
+  },
+  "rip.failed.title": {
+    "en": "Rip failed",
+    "zh-CN": "抓取失败"
+  },
+  "verdict.perfect.title": {
+    "en": "Perfect rip",
+    "zh-CN": "完美抓取"
+  },
+  "verdict.verified.title": {
+    "en": "Verified",
+    "zh-CN": "已校验"
+  },
+  "verdict.check.title": {
+    "en": "Check the rip",
+    "zh-CN": "请检查"
   }
 }

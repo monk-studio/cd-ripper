@@ -18,7 +18,7 @@ fn main() -> impl std::process::Termination {
             title: "CDR".to_owned(),
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             app_id: "com.monk-studio.cdr".to_owned(),
-            size: (720, 640),
+            size: (860, 640),
             ..Default::default()
         },
     )
