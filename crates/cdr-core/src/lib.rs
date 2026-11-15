@@ -29,4 +29,6 @@ pub const USER_AGENT: &str = concat!(
 pub mod storage_keys {
     /// The music library folder rips are filed into.
     pub const LIBRARY: &str = "library";
+    /// "1" to read every track twice (secure mode).
+    pub const SECURE: &str = "secure";
 }

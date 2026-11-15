@@ -1,5 +1,6 @@
 //! The app, headless, with a fake disc and a fake rip.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use cdr_app::backend::{Backend, Disc, RipRequest, set_backend};
@@ -65,12 +66,23 @@ fn disc() -> Disc {
     }
 }
 
-/// Rips instantly: every track accurate at confidence 40.
-struct Fake;
+/// Rips instantly: every track accurate at confidence 40. Remembers what it
+/// was asked to do.
+#[derive(Default)]
+struct Fake {
+    ejected: AtomicBool,
+    secure: AtomicBool,
+}
 
 impl Backend for Fake {
     fn read_disc(&self) -> anyhow::Result<Disc> {
+        anyhow::ensure!(!self.ejected.load(Ordering::SeqCst), "no disc");
         Ok(disc())
+    }
+
+    fn eject(&self, _disc: &Disc) -> anyhow::Result<()> {
+        self.ejected.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     fn rip(
@@ -79,6 +91,7 @@ impl Backend for Fake {
         request: RipRequest,
         on_event: &mut dyn FnMut(Event),
     ) -> anyhow::Result<RipReport> {
+        self.secure.store(request.secure, Ordering::SeqCst);
         let mut tracks = Vec::new();
         for (n, t) in disc.toc.tracks.iter().enumerate() {
             on_event(Event::Progress {
@@ -135,7 +148,11 @@ impl Backend for Fake {
 }
 
 fn start(storage: &[(&str, &str)]) -> Headless {
-    set_backend(Arc::new(Fake));
+    start_with(Arc::new(Fake::default()), storage)
+}
+
+fn start_with(fake: Arc<Fake>, storage: &[(&str, &str)]) -> Headless {
+    set_backend(fake);
     let mut config = EngineConfig::new(Root::of::<cdr_app::App>());
     config.storage = Some(MemoryStorage::new(
         storage.iter().map(|(k, v)| (k.to_string(), v.to_string())),
@@ -171,5 +188,61 @@ fn rips_into_the_library_and_shows_the_verdict() {
         3
     );
     assert!(app.shows("Show in Finder"));
-    assert!(app.shows("Next Disc"));
+    assert!(app.shows("Eject"));
+}
+
+fn library() -> String {
+    let dir = std::env::temp_dir().join(format!("cdr-app-test-{}", std::process::id()));
+    dir.to_string_lossy().into_owned()
+}
+
+#[test]
+fn secure_mode_setting_reaches_the_rip() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Read every track twice").unwrap();
+    app.press("text:Rip").unwrap();
+    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
+        .unwrap();
+    assert!(fake.secure.load(Ordering::SeqCst));
+}
+
+#[test]
+fn secure_mode_is_remembered() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(
+        fake.clone(),
+        &[(storage_keys::LIBRARY, &lib), (storage_keys::SECURE, "1")],
+    );
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip").unwrap();
+    app.wait_for("text:Perfect: all 3 tracks match AccurateRip")
+        .unwrap();
+    assert!(
+        fake.secure.load(Ordering::SeqCst),
+        "the stored setting applies without touching it"
+    );
+}
+
+#[test]
+fn eject_after_ripping_waits_for_the_next_disc() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip").unwrap();
+    app.wait_for("text:Eject").unwrap();
+    app.press("text:Eject").unwrap();
+    app.wait_for("text:Insert an audio CD").unwrap();
+    assert!(fake.ejected.load(Ordering::SeqCst));
+    // The disc is gone: across a disc poll (every 2 s) the app stays put.
+    app.wait(std::time::Duration::from_secs(3)).unwrap();
+    assert!(!app.shows("12 hugs (like butterflies)"));
+    assert!(app.shows("Insert an audio CD"));
 }

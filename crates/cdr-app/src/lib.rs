@@ -51,6 +51,7 @@ pub fn App() -> impl IntoElement {
     let disc = signal(None::<Disc>);
     let chosen = signal(0_usize);
     let library = signal(Storage::get_item(storage_keys::LIBRARY));
+    let secure = signal(Storage::get_item(storage_keys::SECURE).as_deref() == Some("1"));
     let rows = signal(Vec::<Row>::new());
     let message = signal(None::<String>);
     // Tasks live as long as the UI they were started in. Handlers run inside
@@ -61,13 +62,13 @@ pub fn App() -> impl IntoElement {
     // Look for a disc every two seconds while there is none.
     spawn(async move {
         loop {
-            if phase.get() == Phase::NoDisc {
-                if let Ok(Ok(found)) = blocking(|| backend().read_disc()).await {
-                    rows.set(rows_for(&found, found.releases.first()));
-                    chosen.set(0);
-                    disc.set(Some(found));
-                    phase.set(Phase::Ready);
-                }
+            if phase.get() == Phase::NoDisc
+                && let Ok(Ok(found)) = blocking(|| backend().read_disc()).await
+            {
+                rows.set(rows_for(&found, found.releases.first()));
+                chosen.set(0);
+                disc.set(Some(found));
+                phase.set(Phase::Ready);
             }
             timer(Duration::from_secs(2)).await;
         }
@@ -82,12 +83,12 @@ pub fn App() -> impl IntoElement {
         let picked = pick_paths(OpenDialog::folders().button_label("Use as Library"));
         app.run(|| {
             spawn(async move {
-                if let Ok(Some(paths)) = picked.await {
-                    if let Some(path) = paths.into_iter().next() {
-                        let path = path.to_string_lossy().into_owned();
-                        let _ = Storage::set_item(storage_keys::LIBRARY, path.clone());
-                        library.set(Some(path));
-                    }
+                if let Ok(Some(paths)) = picked.await
+                    && let Some(path) = paths.into_iter().next()
+                {
+                    let path = path.to_string_lossy().into_owned();
+                    let _ = Storage::set_item(storage_keys::LIBRARY, path.clone());
+                    library.set(Some(path));
                 }
             })
         });
@@ -118,13 +119,14 @@ pub fn App() -> impl IntoElement {
         rows.set(rows_for(&d, release.as_ref()));
         phase.set(Phase::Ripping);
 
+        let secure_now = secure.get();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let work = blocking(move || {
             let request = RipRequest {
                 release,
                 dests,
                 tags,
-                secure: false,
+                secure: secure_now,
             };
             backend().rip(&d, request, &mut |event| {
                 let _ = tx.send(event);
@@ -174,15 +176,34 @@ pub fn App() -> impl IntoElement {
             count,
         );
         if let Some(first) = dests.first() {
-            let _ = reveal_path(first.clone());
+            // Fire and forget: it opens Finder or fails quietly.
+            drop(reveal_path(first.clone()));
         }
     };
 
-    let next_disc = move || {
-        disc.set(None);
-        rows.set(Vec::new());
-        message.set(None);
-        phase.set(Phase::NoDisc);
+    // Eject rather than just reset: the disc still in the drive would be found again.
+    let eject = move || {
+        let Some(d) = disc.get() else { return };
+        app.run(|| {
+            spawn(async move {
+                match blocking(move || backend().eject(&d)).await {
+                    Ok(Ok(())) => {
+                        disc.set(None);
+                        rows.set(Vec::new());
+                        message.set(None);
+                        phase.set(Phase::NoDisc);
+                    }
+                    Ok(Err(e)) => message.set(Some(format!("Couldn't eject: {e:#}"))),
+                    Err(e) => message.set(Some(format!("Couldn't eject: {e}"))),
+                }
+            })
+        });
+    };
+
+    let toggle_secure = move || {
+        let on = !secure.get();
+        let _ = Storage::set_item(storage_keys::SECURE, if on { "1" } else { "0" });
+        secure.set(on);
     };
 
     view()
@@ -211,7 +232,7 @@ pub fn App() -> impl IntoElement {
                     .child(when(move || message.get().is_some(), move || {
                         text(move || message.get().unwrap_or_default()).text_color(move || theme().destructive)
                     }))
-                    .child(footer(phase, library, choose_folder, start_rip, reveal, next_disc))
+                    .child(footer(phase, library, secure, choose_folder, toggle_secure, start_rip, reveal, eject))
             }),
         )
 }
@@ -362,13 +383,16 @@ fn track_list(rows: Signal<Vec<Row>>) -> impl IntoElement {
     )))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn footer(
     phase: Signal<Phase>,
     library: Signal<Option<String>>,
+    secure: Signal<bool>,
     choose_folder: impl Fn() + Clone + 'static,
+    toggle_secure: impl Fn() + Clone + 'static,
     start_rip: impl Fn() + Clone + 'static,
     reveal: impl Fn() + Clone + 'static,
-    next_disc: impl Fn() + Clone + 'static,
+    eject: impl Fn() + Clone + 'static,
 ) -> impl IntoElement {
     let verdict_text = move || match phase.get() {
         Phase::Done(_, text) => text,
@@ -387,9 +411,22 @@ fn footer(
         .border_t_1()
         .border_color(move || theme().border)
         .child(
-            text(verdict_text)
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(verdict_color),
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .child(
+                    text(verdict_text)
+                        .flex_1()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(verdict_color),
+                )
+                .child(checkbox_button(
+                    "Read every track twice",
+                    secure,
+                    move || phase.get() == Phase::Ripping,
+                    toggle_secure,
+                )),
         )
         .child(
             view()
@@ -419,8 +456,8 @@ fn footer(
                 .child(when(
                     move || matches!(phase.get(), Phase::Done(..) | Phase::Failed(_)),
                     {
-                        let next_disc = next_disc.clone();
-                        move || secondary_button("Next Disc", || false, next_disc.clone())
+                        let eject = eject.clone();
+                        move || secondary_button("Eject", || false, eject.clone())
                     },
                 ))
                 .child(when(move || phase.get() == Phase::Ready, {
@@ -441,7 +478,7 @@ fn footer(
                                 }
                             })
                             .active(|s| s.opacity(0.8))
-                            .on_press(move || start_rip())
+                            .on_press(start_rip)
                             .child(
                                 text("Rip")
                                     .font_weight(FontWeight::MEDIUM)
@@ -450,6 +487,52 @@ fn footer(
                     }
                 })),
         )
+}
+
+/// A setting that is on or off: a box that shows a tick, and its label.
+fn checkbox_button(
+    label: &'static str,
+    on: Signal<bool>,
+    disabled: impl Fn() -> bool + Clone + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let dimmed = disabled.clone();
+    button()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .selected(move || on.get())
+        .disabled(disabled)
+        .opacity(move || if dimmed() { 0.4_f32 } else { 1.0 })
+        .on_press(on_press)
+        .child(
+            view()
+                .size(px(16.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(move || {
+                    if on.get() {
+                        theme().primary
+                    } else {
+                        theme().border
+                    }
+                })
+                .bg(move || {
+                    if on.get() {
+                        theme().primary
+                    } else {
+                        theme().background
+                    }
+                })
+                .items_center()
+                .justify_center()
+                .child(
+                    text(move || if on.get() { "✓" } else { "" })
+                        .text_xs()
+                        .text_color(move || theme().primary_foreground),
+                ),
+        )
+        .child(text(label).text_sm())
 }
 
 fn secondary_button(

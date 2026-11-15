@@ -40,6 +40,9 @@ pub trait Backend: Send + Sync {
         request: RipRequest,
         on_event: &mut dyn FnMut(Event),
     ) -> anyhow::Result<RipReport>;
+
+    /// Ejects `disc` from its drive. Blocking.
+    fn eject(&self, disc: &Disc) -> anyhow::Result<()>;
 }
 
 /// The drive, MusicBrainz and AccurateRip.
@@ -74,6 +77,24 @@ impl Backend for Real {
             data_dir: cdr_core::offsets::data_dir(),
         };
         album::rip(drive.as_mut(), plan, on_event)
+    }
+
+    fn eject(&self, disc: &Disc) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            // The disc's own device, so the right drive opens when there are several.
+            let out = std::process::Command::new("diskutil")
+                .args(["eject", &disc.device])
+                .output()?;
+            anyhow::ensure!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        anyhow::bail!("can't eject {} on this platform yet", disc.device)
     }
 }
 
