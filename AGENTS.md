@@ -1,5 +1,11 @@
 # CDR
 
+## Vision
+
+"Insert a CD. Get a perfect copy in your own library." `docs/vision.md` says
+what that promises (accurate, fast, intuitive) and how to use it to decide
+unclear choices.
+
 ## Behaviour spec
 
 `docs/spec.md` says what the ripper does and why: reading, verification,
