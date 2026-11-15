@@ -1,6 +1,6 @@
 {
   "name": "CDR",
-  "id": "com.monkstudio.cdr",
+  "id": "com.monk-studio.cdr",
   "version": "0.1.0",
   "build": 1,
   "rust": ".",
