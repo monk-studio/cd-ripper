@@ -26,6 +26,15 @@ pub struct RipRequest {
     pub dests: Vec<PathBuf>,
     pub tags: Vec<Tags>,
     pub secure: bool,
+    /// The drive's read offset the user set; `None`: CDR finds it.
+    pub offset: Option<i32>,
+}
+
+/// A Jellyfin server to tell about new albums.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Server {
+    pub url: String,
+    pub api_key: String,
 }
 
 pub trait Backend: Send + Sync {
@@ -47,7 +56,27 @@ pub trait Backend: Send + Sync {
     /// The app the system opens when a music CD goes in, if any. It reads the
     /// disc at the same time as CDR and slows ripping down. Blocking.
     fn app_opened_on_insert(&self) -> Option<AutoOpen>;
+
+    /// The Jellyfin API key kept in the Keychain, if any.
+    fn api_key(&self) -> Option<String>;
+
+    /// Keeps `key` in the Keychain, or removes it with `None`.
+    fn set_api_key(&self, key: Option<&str>) -> anyhow::Result<()>;
+
+    /// The server's music libraries: whether its address and key work.
+    /// Blocking.
+    fn check_server(&self, server: &Server) -> anyhow::Result<Vec<String>>;
+
+    /// Has the server rescan its music libraries; returns their names.
+    /// Blocking.
+    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>>;
 }
+
+/// The Keychain item the Jellyfin API key is kept in.
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "com.monk-studio.cdr";
+#[cfg(target_os = "macos")]
+const KEYCHAIN_ACCOUNT: &str = "jellyfin";
 
 /// What the system opens when a music CD goes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +121,7 @@ impl Backend for Real {
             release: request.release.as_ref(),
             dests: request.dests,
             tags: request.tags,
-            offset: None,
+            offset: request.offset,
             secure: request.secure,
             data_dir: cdr_core::offsets::data_dir(),
         };
@@ -139,6 +168,52 @@ impl Backend for Real {
         }
         #[cfg(not(target_os = "macos"))]
         None
+    }
+
+    fn api_key(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            let bytes = security_framework::passwords::get_generic_password(
+                KEYCHAIN_SERVICE,
+                KEYCHAIN_ACCOUNT,
+            )
+            .ok()?;
+            String::from_utf8(bytes).ok().filter(|k| !k.is_empty())
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
+    fn set_api_key(&self, key: Option<&str>) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            use security_framework::passwords;
+            match key.filter(|k| !k.is_empty()) {
+                Some(key) => passwords::set_generic_password(
+                    KEYCHAIN_SERVICE,
+                    KEYCHAIN_ACCOUNT,
+                    key.as_bytes(),
+                )?,
+                None => {
+                    // Nothing to remove is fine.
+                    let _ = passwords::delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = key;
+            anyhow::bail!("no keychain on this platform yet")
+        }
+    }
+
+    fn check_server(&self, server: &Server) -> anyhow::Result<Vec<String>> {
+        cdr_core::jellyfin::Jellyfin::new(&server.url, &server.api_key).music_libraries()
+    }
+
+    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>> {
+        cdr_core::jellyfin::Jellyfin::new(&server.url, &server.api_key).scan_music()
     }
 }
 

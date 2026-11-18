@@ -5,23 +5,26 @@
 
 pub mod backend;
 mod look;
+mod settings;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use backend::{AutoOpen, Disc, RipRequest, backend, is_access_denied};
 use cdr_core::album::{self, Event};
-use cdr_core::library::DEFAULT_TEMPLATE;
 use cdr_core::musicbrainz::{DiscToc, Release, TrackMeta};
 use cdr_core::offsets::OffsetSource;
 use cdr_core::report::{RipReport, TrackReport, Verdict};
 use cdr_core::storage_keys;
 use look::{color, icon, icon_with, icons};
 use nsh_base::{button, progress};
+use nsh_core::desktop::MenuRole;
+use nsh_core::element::desktop::{MenuItem, set_application_menu};
 use nsh_core::element::input;
 use nsh_core::file_dialog::OpenDialog;
 use nsh_core::prelude::*;
 use nsh_core::storage::Storage;
+use settings::{Settings, settings_window};
 
 /// The translations in `locales/`. `nsh run` and `nsh package` compile them
 /// in themselves; [`root`] does it for `cargo run` and the tests.
@@ -87,8 +90,11 @@ pub fn App() -> impl IntoElement {
     let disc = signal(None::<Disc>);
     let chosen = signal(0_usize);
     let picking = signal(false);
-    let library = signal(Storage::get_item(storage_keys::LIBRARY));
-    let secure = signal(Storage::get_item(storage_keys::SECURE).as_deref() == Some("1"));
+    let settings = Settings::load();
+    let library = settings.library;
+    let settings_open = signal(false);
+    // What Jellyfin said after the rip: the libraries it scans, or why not.
+    let rescanned = signal(None::<Result<Vec<String>, String>>);
     // Another app the system opens on insert, which would read the disc too.
     let auto_open = signal(None::<AutoOpen>);
     let access_denied = signal(false);
@@ -103,6 +109,47 @@ pub fn App() -> impl IntoElement {
     // buttons that come and go (Rip disappears once ripping starts), so the
     // tasks they start belong to the app instead.
     let app = Owner::current();
+
+    set_application_menu(vec![
+        MenuItem::submenu(
+            "CDR",
+            [
+                MenuItem::role(MenuRole::About),
+                MenuItem::separator(),
+                MenuItem::new(t!("menu.settings"))
+                    .shortcut("mod+,")
+                    .on_select(move || settings_open.set(true)),
+                MenuItem::separator(),
+                MenuItem::role(MenuRole::Hide),
+                MenuItem::role(MenuRole::HideOthers),
+                MenuItem::role(MenuRole::ShowAll),
+                MenuItem::separator(),
+                MenuItem::role(MenuRole::Quit),
+            ],
+        ),
+        // The text fields (tags, settings) need these.
+        MenuItem::submenu(
+            t!("menu.edit"),
+            [
+                MenuItem::role(MenuRole::Undo),
+                MenuItem::role(MenuRole::Redo),
+                MenuItem::separator(),
+                MenuItem::role(MenuRole::Cut),
+                MenuItem::role(MenuRole::Copy),
+                MenuItem::role(MenuRole::Paste),
+                MenuItem::role(MenuRole::SelectAll),
+            ],
+        ),
+        MenuItem::submenu(
+            t!("menu.window"),
+            [
+                MenuItem::role(MenuRole::Minimize),
+                MenuItem::role(MenuRole::Zoom),
+                MenuItem::separator(),
+                MenuItem::role(MenuRole::Close),
+            ],
+        ),
+    ]);
 
     let check_auto_open = move || {
         spawn(async move {
@@ -186,7 +233,7 @@ pub fn App() -> impl IntoElement {
         let count = d.toc.audio_tracks().count();
         Some(album::destinations(
             Some(&PathBuf::from(root)),
-            DEFAULT_TEMPLATE,
+            &settings.template(),
             release.as_ref(),
             &disc_id,
             count,
@@ -217,6 +264,10 @@ pub fn App() -> impl IntoElement {
             return;
         };
         let release = release();
+        let Ok(offset) = settings.offset() else {
+            message.set(Some(t!("rip.bad_offset")));
+            return;
+        };
         if let Some(existing) = dests.iter().find(|p| p.exists()) {
             message.set(Some(t!(
                 "rip.already_in_library",
@@ -225,13 +276,15 @@ pub fn App() -> impl IntoElement {
             return;
         }
         message.set(None);
+        rescanned.set(None);
         picking.set(false);
         offset_line.set(String::new());
         rows.set(rows_for(&d, release.as_ref()));
         started.set(Some(Instant::now()));
         phase.set(Phase::Ripping);
 
-        let secure_now = secure.get();
+        let secure_now = settings.secure.get();
+        let server = settings.server();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let work = blocking(move || {
             let request = RipRequest {
@@ -239,6 +292,7 @@ pub fn App() -> impl IntoElement {
                 dests,
                 tags,
                 secure: secure_now,
+                offset,
             };
             backend().rip(&d, request, &mut |event| {
                 let _ = tx.send(event);
@@ -275,6 +329,16 @@ pub fn App() -> impl IntoElement {
                         let took = started.get().map(|s| s.elapsed()).unwrap_or_default();
                         let sectors: u32 = rows.get().iter().map(|r| r.sectors).sum();
                         phase.set(Phase::Done(verdict, text, how_it_went(took, sectors)));
+                        // Have the library server pick the album up.
+                        if let Some(server) = server {
+                            rescanned.set(Some(
+                                match blocking(move || backend().rescan(&server)).await {
+                                    Ok(Ok(names)) => Ok(names),
+                                    Ok(Err(e)) => Err(format!("{e:#}")),
+                                    Err(e) => Err(e.to_string()),
+                                },
+                            ));
+                        }
                     }
                     Ok(Err(e)) => phase.set(Phase::Failed(format!("{e:#}"))),
                     Err(e) => phase.set(Phase::Failed(e.to_string())),
@@ -302,6 +366,7 @@ pub fn App() -> impl IntoElement {
                         disc.set(None);
                         rows.set(Vec::new());
                         message.set(None);
+                        rescanned.set(None);
                         editing.set(None);
                         picking.set(false);
                         phase.set(Phase::NoDisc);
@@ -315,12 +380,6 @@ pub fn App() -> impl IntoElement {
         });
     };
 
-    let toggle_secure = move || {
-        let on = !secure.get();
-        let _ = Storage::set_item(storage_keys::SECURE, if on { "1" } else { "0" });
-        secure.set(on);
-    };
-
     let releases = move || disc.get().map(|d| d.releases).unwrap_or_default();
 
     view()
@@ -328,6 +387,7 @@ pub fn App() -> impl IntoElement {
         .bg(color::WINDOW)
         .text_color(color::TEXT)
         .text_size(px(13.0))
+        .child(settings_window(settings_open, settings, choose_folder))
         // Above every screen: it matters most while ripping.
         .child(auto_open_notice(auto_open, move || {
             app.run(check_auto_open)
@@ -371,6 +431,19 @@ pub fn App() -> impl IntoElement {
                         }),
                     )
                     .child(when(
+                        move || matches!(rescanned.get(), Some(Err(_))),
+                        move || {
+                            text(move || match rescanned.get() {
+                                Some(Err(e)) => t!("jellyfin.failed", error = e),
+                                _ => String::new(),
+                            })
+                            .px(px(24.0))
+                            .py(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(color::WARN)
+                        },
+                    ))
+                    .child(when(
                         move || message.get().is_some(),
                         move || {
                             text(move || message.get().unwrap_or_default())
@@ -383,12 +456,11 @@ pub fn App() -> impl IntoElement {
                     .child(footer(
                         phase,
                         library,
-                        secure,
                         album_folder,
                         offset_line,
+                        rescanned,
                         Actions {
                             choose_folder,
-                            toggle_secure,
                             start_rip,
                             reveal,
                             eject,
@@ -1083,23 +1155,21 @@ fn track_list(rows: Signal<Vec<Row>>, phase: Signal<Phase>) -> impl IntoElement 
 }
 
 /// What the footer's buttons do.
-struct Actions<A, B, C, D, E> {
+struct Actions<A, B, C, D> {
     choose_folder: A,
-    toggle_secure: B,
-    start_rip: C,
-    reveal: D,
-    eject: E,
+    start_rip: B,
+    reveal: C,
+    eject: D,
 }
 
 /// Where the album goes, and what to do next.
 fn footer(
     phase: Signal<Phase>,
     library: Signal<Option<String>>,
-    secure: Signal<bool>,
     album_folder: impl Fn() -> Option<String> + Copy + 'static,
     offset_line: Signal<String>,
+    rescanned: Signal<Option<Result<Vec<String>, String>>>,
     actions: Actions<
-        impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
@@ -1108,7 +1178,6 @@ fn footer(
 ) -> impl IntoElement {
     let Actions {
         choose_folder,
-        toggle_secure,
         start_rip,
         reveal,
         eject,
@@ -1117,9 +1186,18 @@ fn footer(
     let finished = move || matches!(phase.get(), Phase::Done(..) | Phase::Failed(_));
     let place = move || match phase.get() {
         Phase::Ripping => offset_line.get(),
-        Phase::Done(..) => album_folder()
-            .map(|p| t!("rip.saved_to", path = p))
-            .unwrap_or_default(),
+        Phase::Done(..) => {
+            let saved = album_folder()
+                .map(|p| t!("rip.saved_to", path = p))
+                .unwrap_or_default();
+            match rescanned.get() {
+                Some(Ok(names)) => format!(
+                    "{saved} · {}",
+                    t!("jellyfin.scanning", libraries = names.join(", "))
+                ),
+                _ => saved,
+            }
+        }
         _ => album_folder().unwrap_or_else(|| t!("library.none")),
     };
     view()
@@ -1144,13 +1222,10 @@ fn footer(
                 .text_size(px(12.0))
                 .text_color(color::MUTED),
         )
-        .child(when(ready, {
+        // Settings has it too; here only until there is a library.
+        .child(when(move || ready() && library.get().is_none(), {
             let choose_folder = choose_folder.clone();
             move || small_button(move || t!("library.choose"), None, choose_folder.clone())
-        }))
-        .child(when(ready, {
-            let toggle_secure = toggle_secure.clone();
-            move || checkbox_button("setting.secure", secure, toggle_secure.clone())
         }))
         .child(when(move || matches!(phase.get(), Phase::Done(..)), {
             let reveal = reveal.clone();

@@ -37,9 +37,9 @@ impl Jellyfin {
         format!("{CLIENT}, Token=\"{}\"", self.api_key)
     }
 
-    /// Starts a scan of every music library and returns their names. The scan
-    /// runs in the background on the server; this returns once it's queued.
-    pub fn scan_music(&self) -> anyhow::Result<Vec<String>> {
+    /// The server's music libraries. Fails when the server can't be reached,
+    /// rejects the key, or has no music library.
+    fn music(&self) -> anyhow::Result<Vec<VirtualFolder>> {
         let resp = match ureq::get(&format!("{}/Library/VirtualFolders", self.url))
             .set("Authorization", &self.auth())
             .call()
@@ -58,6 +58,19 @@ impl Jellyfin {
             !music.is_empty(),
             "the Jellyfin server has no music library"
         );
+        Ok(music)
+    }
+
+    /// The names of the server's music libraries, without scanning them: a
+    /// check that the address and key work.
+    pub fn music_libraries(&self) -> anyhow::Result<Vec<String>> {
+        Ok(self.music()?.into_iter().map(|f| f.name).collect())
+    }
+
+    /// Starts a scan of every music library and returns their names. The scan
+    /// runs in the background on the server; this returns once it's queued.
+    pub fn scan_music(&self) -> anyhow::Result<Vec<String>> {
+        let music = self.music()?;
         for folder in &music {
             ureq::post(&format!(
                 "{}/Items/{}/Refresh?Recursive=true&MetadataRefreshMode=Default&ImageRefreshMode=Default",

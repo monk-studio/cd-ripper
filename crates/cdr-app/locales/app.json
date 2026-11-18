@@ -199,5 +199,117 @@
   "verdict.check.title": {
     "en": "Check the rip",
     "zh-CN": "请检查"
+  },
+  "menu.settings": {
+    "en": "Settings…",
+    "zh-CN": "设置…"
+  },
+  "menu.edit": {
+    "en": "Edit",
+    "zh-CN": "编辑"
+  },
+  "menu.window": {
+    "en": "Window",
+    "zh-CN": "窗口"
+  },
+  "settings.library": {
+    "en": "Library",
+    "zh-CN": "曲库"
+  },
+  "settings.ripping": {
+    "en": "Ripping",
+    "zh-CN": "抓取"
+  },
+  "settings.servers": {
+    "en": "Servers",
+    "zh-CN": "服务器"
+  },
+  "settings.library_folder": {
+    "en": "Library folder",
+    "zh-CN": "曲库文件夹"
+  },
+  "settings.library_folder.hint": {
+    "en": "CDR files each album here.",
+    "zh-CN": "CDR 把每张专辑存到这里。"
+  },
+  "settings.choose": {
+    "en": "Choose…",
+    "zh-CN": "选择…"
+  },
+  "settings.file_names": {
+    "en": "File names",
+    "zh-CN": "文件名"
+  },
+  "settings.file_names.hint": {
+    "en": "Uses {albumartist}, {artist}, {album}, {year}, {disc}, {discprefix}, {track} and {title}; / makes a folder. For example: %{example}",
+    "zh-CN": "可用 {albumartist}、{artist}、{album}、{year}、{disc}、{discprefix}、{track}、{title}；/ 表示文件夹。例如：%{example}"
+  },
+  "settings.reading": {
+    "en": "Reading",
+    "zh-CN": "读取"
+  },
+  "settings.reading.hint": {
+    "en": "Slower. Each track is read twice and compared, which matters for discs AccurateRip doesn't know.",
+    "zh-CN": "较慢。每轨读两遍并比对，对 AccurateRip 没有收录的光盘更有用。"
+  },
+  "settings.offset": {
+    "en": "Read offset",
+    "zh-CN": "读取偏移"
+  },
+  "settings.offset.automatic": {
+    "en": "Automatic",
+    "zh-CN": "自动"
+  },
+  "settings.offset.hint": {
+    "en": "In samples. Leave it empty and CDR finds your drive's offset from AccurateRip's list of drives or from the discs it rips.",
+    "zh-CN": "单位为采样。留空时，CDR 会从 AccurateRip 的光驱列表或抓过的光盘中找出光驱的偏移。"
+  },
+  "settings.offset.invalid": {
+    "en": "Type a whole number of samples, like +6 or -1164, or leave it empty.",
+    "zh-CN": "请输入整数采样数，如 +6 或 -1164，或者留空。"
+  },
+  "settings.jellyfin.hint": {
+    "en": "The server's address. After each rip, Jellyfin scans its music libraries.",
+    "zh-CN": "服务器地址。每次抓取后，Jellyfin 会扫描它的音乐库。"
+  },
+  "settings.api_key": {
+    "en": "API key",
+    "zh-CN": "API 密钥"
+  },
+  "settings.api_key.hint": {
+    "en": "Create one in Jellyfin under Dashboard › API Keys. Kept in your Keychain.",
+    "zh-CN": "在 Jellyfin 的「控制台 › API 密钥」中创建。保存在你的钥匙串里。"
+  },
+  "settings.api_key.not_saved": {
+    "en": "Couldn't save the key to the Keychain: %{error}",
+    "zh-CN": "无法把密钥存入钥匙串：%{error}"
+  },
+  "settings.jellyfin.check": {
+    "en": "Check Connection",
+    "zh-CN": "检查连接"
+  },
+  "settings.jellyfin.checking": {
+    "en": "Checking…",
+    "zh-CN": "正在检查…"
+  },
+  "settings.jellyfin.connected": {
+    "en": "Connected · Music libraries: %{libraries}",
+    "zh-CN": "已连接 · 音乐库：%{libraries}"
+  },
+  "settings.jellyfin.incomplete": {
+    "en": "Enter the server's address and an API key first.",
+    "zh-CN": "请先填写服务器地址和 API 密钥。"
+  },
+  "rip.bad_offset": {
+    "en": "The read offset in Settings isn't a number of samples.",
+    "zh-CN": "设置中的读取偏移不是有效的采样数。"
+  },
+  "jellyfin.scanning": {
+    "en": "Jellyfin is scanning %{libraries}",
+    "zh-CN": "Jellyfin 正在扫描 %{libraries}"
+  },
+  "jellyfin.failed": {
+    "en": "Saved, but Jellyfin didn't rescan: %{error}",
+    "zh-CN": "已保存，但 Jellyfin 没有重新扫描：%{error}"
   }
 }

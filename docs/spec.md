@@ -212,7 +212,7 @@ folders while we write. They should only ever see finished files.
 After filing, optionally:
 
 - **Jellyfin**: rescan every library of type *music* (not films or shows).
-  Authenticated with an API key.
+  Authenticated with an API key. The Mac app only offers Jellyfin for now.
 - **Navidrome**: Subsonic `startScan`, with salted-token authentication (the
   password never travels). Only admin users may start scans.
 
@@ -268,3 +268,25 @@ Every filed album gets two records of the same facts.
 - Peak memory is 670–820 MB, mostly FLAC encoding copies (CDR-12).
 - Secure mode's behaviour on damaged discs is covered by simulated-fault tests
   only.
+
+## 8. Mac app settings
+
+Settings (⌘,) holds what most users set once. Each setting is saved as it
+changes and applies to the next rip.
+
+- **Library**: the library folder, and the file-name template (§4.3). An
+  empty template means the default; the hint shows where a sample track
+  would go. Until a library is chosen, the main window offers to choose one
+  too.
+- **Ripping**: *Read every track twice* (secure mode, §1.3), off by default;
+  and the read offset. Empty means automatic (§1.4, steps 2–4); a number is
+  the offset set by hand (step 1). Anything else, or beyond ±3000 samples,
+  is refused, and Rip won't start until it is fixed.
+- **Servers**: a Jellyfin address and API key. The key is kept in the macOS
+  Keychain (service `com.monk-studio.cdr`, account `jellyfin`), never in the
+  app's settings file. *Check Connection* lists the server's music libraries
+  without scanning them. Once both are set, every finished rip (any verdict)
+  asks Jellyfin to rescan (§4.5); the result shows in the footer.
+
+*Why:* the defaults are right for most discs (see `docs/vision.md`), so
+these stay out of the main window.

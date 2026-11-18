@@ -31,4 +31,13 @@ pub mod storage_keys {
     pub const LIBRARY: &str = "library";
     /// "1" to read every track twice (secure mode).
     pub const SECURE: &str = "secure";
+    /// The file-name template under the library (`library::DEFAULT_TEMPLATE`
+    /// when unset).
+    pub const TEMPLATE: &str = "template";
+    /// The drive's read offset in samples, when the user sets it; unset means
+    /// CDR finds it itself.
+    pub const OFFSET: &str = "offset";
+    /// The Jellyfin server to rescan after each rip. Its API key is in the
+    /// Keychain, not here.
+    pub const JELLYFIN_URL: &str = "jellyfin.url";
 }

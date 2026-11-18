@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use cdr_app::backend::{AutoOpen, Backend, Disc, RipRequest, set_backend};
+use cdr_app::backend::{AutoOpen, Backend, Disc, RipRequest, Server, set_backend};
 use cdr_core::album::Event;
 use cdr_core::musicbrainz::{Release, TrackMeta};
 use cdr_core::offsets::OffsetSource;
@@ -80,6 +80,10 @@ struct Fake {
     releases: Mutex<Option<Vec<Release>>>,
     /// What the last rip was asked to write.
     ripped: Mutex<Option<RipRequest>>,
+    /// The Keychain's API key.
+    api_key: Mutex<Option<String>>,
+    /// The servers told to rescan.
+    rescanned: Mutex<Vec<Server>>,
 }
 
 impl Backend for Fake {
@@ -98,6 +102,28 @@ impl Backend for Fake {
 
     fn app_opened_on_insert(&self) -> Option<AutoOpen> {
         *self.auto_open.lock().unwrap()
+    }
+
+    fn api_key(&self) -> Option<String> {
+        self.api_key.lock().unwrap().clone()
+    }
+
+    fn set_api_key(&self, key: Option<&str>) -> anyhow::Result<()> {
+        *self.api_key.lock().unwrap() = key.map(str::to_owned);
+        Ok(())
+    }
+
+    fn check_server(&self, server: &Server) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(
+            server.api_key == "good-key",
+            "Jellyfin rejected the API key"
+        );
+        Ok(vec!["Music".into()])
+    }
+
+    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>> {
+        self.rescanned.lock().unwrap().push(server.clone());
+        self.check_server(server)
     }
 
     fn eject(&self, _disc: &Disc) -> anyhow::Result<()> {
@@ -188,6 +214,8 @@ fn start_in(fake: Arc<Fake>, storage: &[(&str, &str)], locale: Option<&str>) -> 
         nsh_core::geometry::Points(860.0),
         nsh_core::geometry::Points(640.0),
     );
+    // On a Mac: the app has its menu bar and a settings window.
+    config.environment.os = nsh_core::platform::Os::MacOs;
     // A user whose system language is `locale`: it leads their preferred languages.
     if let Some(tag) = locale {
         config.environment.locale = nsh_core::platform::Locale::parse(tag).unwrap();
@@ -242,7 +270,10 @@ fn secure_mode_setting_reaches_the_rip() {
     let lib = library();
     let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    open_settings(&mut app);
+    app.press("text:Ripping").unwrap();
     app.press("text:Read every track twice").unwrap();
+    app.press_window_close("settings").unwrap();
     app.press("text:Rip CD").unwrap();
     app.wait_for("text:Perfect rip").unwrap();
     assert!(fake.secure.load(Ordering::SeqCst));
@@ -323,7 +354,9 @@ fn speaks_chinese_when_the_system_does() {
         Some("zh-CN"),
     );
     app.wait_for("text:12 hugs (like butterflies)").unwrap();
-    assert!(app.shows("每轨读取两遍"));
+    open_settings(&mut app);
+    app.wait_for("text:曲库文件夹").unwrap();
+    app.press_window_close("settings").unwrap();
     app.press("text:开始抓取").unwrap();
     app.wait_for("text:完美抓取").unwrap();
     assert!(app.shows("准确（40）"));
@@ -437,4 +470,129 @@ fn edits_to_a_known_release_keep_its_musicbrainz_ids() {
         Some("Hug.m4a"),
         "other tracks untouched"
     );
+}
+
+fn open_settings(app: &mut Headless) {
+    app.press_key("mod+,").unwrap();
+    app.wait_for("id:template").unwrap();
+}
+
+#[test]
+fn the_library_can_be_chosen_from_the_footer_until_there_is_one() {
+    let _turn = serial();
+    let mut app = start(&[]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    assert!(app.shows("Choose Library…"));
+    let lib = library();
+    let mut app = start(&[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    assert!(!app.shows("Choose Library…"), "it lives in Settings then");
+}
+
+#[test]
+fn the_file_name_template_shapes_the_library_path() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    open_settings(&mut app);
+    app.type_text("id:template", "{album}/{track} {title}")
+        .unwrap();
+    app.wait_for("text:/For example: 12 hugs \\(like butterflies\\)\\/01 Hug\\.m4a\\.flac/")
+        .unwrap();
+    app.press_window_close("settings").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
+    let ripped = fake.ripped.lock().unwrap();
+    let path = ripped.as_ref().unwrap().dests[1]
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        path.ends_with("12 hugs (like butterflies)/02 more than words.flac"),
+        "{path}"
+    );
+}
+
+#[test]
+fn a_read_offset_set_by_hand_reaches_the_rip() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    open_settings(&mut app);
+    app.press("text:Ripping").unwrap();
+    app.type_text("id:offset", "six").unwrap();
+    app.wait_for("text:/Type a whole number of samples/")
+        .unwrap();
+    app.clear("id:offset").unwrap();
+    app.type_text("id:offset", "+6").unwrap();
+    app.press_window_close("settings").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
+    assert_eq!(
+        fake.ripped.lock().unwrap().as_ref().unwrap().offset,
+        Some(6)
+    );
+}
+
+#[test]
+fn offset_is_automatic_unless_set() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
+    assert_eq!(fake.ripped.lock().unwrap().as_ref().unwrap().offset, None);
+}
+
+#[test]
+fn jellyfin_is_checked_and_rescans_after_the_rip() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    open_settings(&mut app);
+    app.press("text:Servers").unwrap();
+    app.type_text("id:jellyfin-url", "http://nas.local:8096")
+        .unwrap();
+    app.type_text("id:jellyfin-key", "bad-key").unwrap();
+    app.press("text:Check Connection").unwrap();
+    app.wait_for("text:/rejected the API key/").unwrap();
+    app.clear("id:jellyfin-key").unwrap();
+    app.type_text("id:jellyfin-key", "good-key").unwrap();
+    app.press("text:Check Connection").unwrap();
+    app.wait_for("text:Connected · Music libraries: Music")
+        .unwrap();
+    assert_eq!(
+        fake.api_key.lock().unwrap().as_deref(),
+        Some("good-key"),
+        "the key goes to the Keychain"
+    );
+    app.press_window_close("settings").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:/Jellyfin is scanning Music/").unwrap();
+    assert_eq!(
+        *fake.rescanned.lock().unwrap(),
+        vec![Server {
+            url: "http://nas.local:8096".into(),
+            api_key: "good-key".into()
+        }]
+    );
+}
+
+#[test]
+fn no_rescan_without_a_server() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
+    assert!(fake.rescanned.lock().unwrap().is_empty());
 }
