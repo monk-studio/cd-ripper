@@ -244,7 +244,7 @@ Every filed album gets two records of the same facts.
 | Service | Rules |
 |---|---|
 | All | User-Agent `CDR/<version> (+https://monk-studio.com)`. No personal data. |
-| AccurateRip | Agreed with Illustrate (2026-11-10, CDR-2): free while CDR is donation-funded, a $250–500/year licence if sold. Identify via User-Agent, cache where possible, **never submit**. The drive database is cached for 30 days. |
+| AccurateRip | Agreed with Illustrate (2026-11-10, CDR-2): free while CDR is donation-funded, a $250–500/year licence if sold. Identify via User-Agent, cache where possible, **never submit**. The drive database is cached for 30 days. Each disc's entry is cached in `accuraterip/` in CDR's data folder: reused for 30 days, or 7 days when the disc wasn't in the database; when AccurateRip can't be reached, an older entry is used. |
 | MusicBrainz | One request per disc. On 503, back off 2, 4 and 8 s. |
 | Cover Art Archive | Thumbnails only (1200 px); originals can be tens of MB. |
 | CTDB | Not used yet; awaiting the maintainer's reply (CDR-2). |
@@ -252,8 +252,7 @@ Every filed album gets two records of the same facts.
 ## 7. Known limitations
 
 - Enhanced-CD AccurateRip disc IDs are unverified on a real disc.
-- No cache yet for AccurateRip disc results or MusicBrainz lookups
-  (AccurateRip asks for one); only its drive database is cached.
+- No cache yet for MusicBrainz lookups.
 - A drive missing from AccurateRip's drive database needs 3 agreeing discs
   before its offset is learned; until then each disc stands in for it.
 - Only one pressing offset is tried per disc (the first track that reveals

@@ -90,7 +90,8 @@ pub fn rip(
     let ids = DiscIds::from_toc(toc);
     let disc_id = DiscToc::from_toc(toc).disc_id();
     let drive_model = drive.model();
-    let db = accuraterip::fetch(&ids).context("querying AccurateRip")?;
+    let ar_cache = plan.data_dir.as_ref().map(|d| d.join("accuraterip"));
+    let db = accuraterip::fetch(&ids, ar_cache.as_deref()).context("querying AccurateRip")?;
     on_event(Event::AccurateRip(db.as_ref().map(Vec::len)));
 
     let mut ripper = Ripper::new(drive, toc, 0);

@@ -5,6 +5,8 @@
 //! themselves in the User-Agent and cache lookups; submitting isn't possible.
 
 use std::io::Read;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use crate::toc::Toc;
 use crate::{SECTOR_SAMPLES, USER_AGENT};
@@ -122,16 +124,78 @@ pub fn parse_response(data: &[u8]) -> anyhow::Result<Vec<Submission>> {
     Ok(out)
 }
 
-/// Fetches the database entry for a disc. `Ok(None)` means the disc isn't in it.
-pub fn fetch(ids: &DiscIds) -> anyhow::Result<Option<Vec<Submission>>> {
+/// How long a disc's entry is reused before asking again. Submissions only
+/// accumulate, so an older copy is still valid evidence, just less of it.
+const FOUND_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+/// A disc that wasn't in the database may be added; ask again sooner.
+const MISSING_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The database entry for a disc; `Ok(None)` means the disc isn't in it.
+/// With `cache` (a folder), a recent answer is reused instead of asking
+/// again, as AccurateRip asks clients to; when asking fails, any earlier
+/// answer is used.
+pub fn fetch(ids: &DiscIds, cache: Option<&Path>) -> anyhow::Result<Option<Vec<Submission>>> {
+    let raw = lookup_cached(ids, cache, SystemTime::now(), || download(ids))?;
+    raw.map(|data| parse_response(&data)).transpose()
+}
+
+/// The raw entry from AccurateRip; `Ok(None)` when it has none (404).
+fn download(ids: &DiscIds) -> anyhow::Result<Option<Vec<u8>>> {
     match ureq::get(&ids.url()).set("User-Agent", USER_AGENT).call() {
         Ok(resp) => {
             let mut data = Vec::new();
             resp.into_reader().read_to_end(&mut data)?;
-            Ok(Some(parse_response(&data)?))
+            Ok(Some(data))
         }
         Err(ureq::Error::Status(404, _)) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// `download`, through the cache in `dir`: `dBAR-<name>.bin` holds an entry
+/// as AccurateRip sent it, `dBAR-<name>.missing` (empty) records that it had
+/// none.
+fn lookup_cached(
+    ids: &DiscIds,
+    dir: Option<&Path>,
+    now: SystemTime,
+    download: impl FnOnce() -> anyhow::Result<Option<Vec<u8>>>,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(dir) = dir else {
+        return download();
+    };
+    let found = dir.join(format!("dBAR-{}.bin", ids.name()));
+    let missing = dir.join(format!("dBAR-{}.missing", ids.name()));
+    let age = |path: &Path| {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+        Some(now.duration_since(modified).unwrap_or_default())
+    };
+    let cached = || std::fs::read(&found).ok();
+    if age(&found).is_some_and(|a| a < FOUND_MAX_AGE)
+        && let Some(data) = cached()
+    {
+        return Ok(Some(data));
+    }
+    if age(&missing).is_some_and(|a| a < MISSING_MAX_AGE) {
+        return Ok(None);
+    }
+    match download() {
+        Ok(answer) => {
+            // A cache that can't be written only costs a lookup next time.
+            let _ = std::fs::create_dir_all(dir);
+            match &answer {
+                Some(data) => {
+                    let _ = std::fs::write(&found, data);
+                    let _ = std::fs::remove_file(&missing);
+                }
+                None => {
+                    let _ = std::fs::write(&missing, b"");
+                }
+            }
+            Ok(answer)
+        }
+        // Offline: an older entry is still valid evidence.
+        Err(e) => cached().map(Some).ok_or(e),
     }
 }
 
@@ -257,6 +321,76 @@ mod tests {
             is_audio: true,
             pre_emphasis: false,
         }
+    }
+
+    fn ids() -> DiscIds {
+        DiscIds {
+            audio_tracks: 3,
+            id1: 0x1234,
+            id2: 0x5678,
+            cddb: 0x9abc,
+        }
+    }
+
+    fn cache_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cdr-ar-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    const DAY: Duration = Duration::from_secs(24 * 3600);
+
+    #[test]
+    fn found_entries_are_reused_for_30_days() {
+        let dir = cache_dir("found");
+        let now = SystemTime::now();
+        let got = lookup_cached(&ids(), Some(&dir), now, || Ok(Some(vec![1, 2])));
+        assert_eq!(got.unwrap(), Some(vec![1, 2]));
+        let again = lookup_cached(&ids(), Some(&dir), now + 29 * DAY, || {
+            panic!("asked again within 30 days")
+        });
+        assert_eq!(again.unwrap(), Some(vec![1, 2]));
+        let later = lookup_cached(&ids(), Some(&dir), now + 31 * DAY, || Ok(Some(vec![3])));
+        assert_eq!(later.unwrap(), Some(vec![3]), "refreshed after 30 days");
+    }
+
+    #[test]
+    fn missing_discs_are_asked_again_after_a_week() {
+        let dir = cache_dir("missing");
+        let now = SystemTime::now();
+        assert_eq!(
+            lookup_cached(&ids(), Some(&dir), now, || Ok(None)).unwrap(),
+            None
+        );
+        let soon = lookup_cached(&ids(), Some(&dir), now + 6 * DAY, || panic!("asked again"));
+        assert_eq!(soon.unwrap(), None);
+        let later = lookup_cached(&ids(), Some(&dir), now + 8 * DAY, || Ok(Some(vec![7])));
+        assert_eq!(later.unwrap(), Some(vec![7]));
+        let next = lookup_cached(&ids(), Some(&dir), now + 9 * DAY, || panic!("asked again"));
+        assert_eq!(
+            next.unwrap(),
+            Some(vec![7]),
+            "the found entry replaces the miss"
+        );
+    }
+
+    #[test]
+    fn an_old_entry_stands_in_when_accuraterip_is_unreachable() {
+        let dir = cache_dir("offline");
+        let now = SystemTime::now();
+        lookup_cached(&ids(), Some(&dir), now, || Ok(Some(vec![5]))).unwrap();
+        let offline = lookup_cached(&ids(), Some(&dir), now + 90 * DAY, || {
+            anyhow::bail!("no network")
+        });
+        assert_eq!(offline.unwrap(), Some(vec![5]));
+        let fresh = cache_dir("offline-empty");
+        assert!(lookup_cached(&ids(), Some(&fresh), now, || anyhow::bail!("no network")).is_err());
+    }
+
+    #[test]
+    fn without_a_cache_it_always_asks() {
+        let got = lookup_cached(&ids(), None, SystemTime::now(), || Ok(Some(vec![9])));
+        assert_eq!(got.unwrap(), Some(vec![9]));
     }
 
     #[test]
