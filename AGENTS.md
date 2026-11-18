@@ -14,13 +14,16 @@ before changing behaviour, and update it in the same commit when you do.
 
 ## Releasing the Mac app
 
-`asc publish-web cdr` (the `asc` CLI, `~/@monk-studio/asc`) packages the app
-with `nsh package`, signs it with Developer ID and the hardened runtime,
-notarizes and staples the app and its DMG with the App Store Connect API key
-from `asc login`, and uploads the DMG to the CDN
-(`cdn.monk-studio.com/cdr/downloads/`). `--skip-upload` stops after the
-notarized DMG. The bundle id is `com.monk-studio.cdr`; don't change it after a
-release, since permissions and settings are tied to it.
+`./release.sh` releases the version in `crates/cdr-app/nsh.json` (bump it
+first). It runs `asc publish-web cdr --skip-upload` (the `asc` CLI,
+`~/@monk-studio/asc`), which packages the app with `nsh package`, signs it
+with Developer ID and the hardened runtime, and notarizes and staples the app
+and its DMG with the App Store Connect API key from `asc login`. Then it
+publishes the DMG as GitLab release `v<version>` and updates the Homebrew
+cask in `Casks/cdr.rb` (this repo is also the tap). The repo is public.
+
+The bundle id is `com.monk-studio.cdr`; don't change it after a release,
+since permissions and settings are tied to it.
 
 ## Reference sources
 
