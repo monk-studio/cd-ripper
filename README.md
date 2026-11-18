@@ -31,6 +31,7 @@ With Homebrew (macOS 14+):
 
 ```sh
 brew tap monk-studio/cd-ripper https://gitlab.com/monk-studio/cd-ripper
+brew trust monk-studio/cd-ripper
 brew install --cask monk-studio/cd-ripper/cdr
 ```
 
