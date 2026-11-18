@@ -17,6 +17,7 @@ if [ -n "$(git status --porcelain)" ]; then
     echo "Commit your changes first: the release is built from HEAD." >&2
     exit 1
 fi
+git fetch -q --tags
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "$TAG already exists: bump the version in crates/cdr-app/nsh.json." >&2
     exit 1
