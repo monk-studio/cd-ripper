@@ -74,6 +74,8 @@ struct Fake {
     secure: AtomicBool,
     /// The system refuses access to the disc.
     denied: AtomicBool,
+    /// No optical drive is connected.
+    no_drive: AtomicBool,
     /// What the system opens on insert.
     auto_open: Mutex<Option<AutoOpen>>,
     /// Replaces the disc's MusicBrainz releases.
@@ -92,12 +94,17 @@ impl Backend for Fake {
             let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
             return Err(anyhow::Error::new(denied).context("opening /dev/rdisk9"));
         }
+        anyhow::ensure!(!self.no_drive.load(Ordering::SeqCst), "no drive");
         anyhow::ensure!(!self.ejected.load(Ordering::SeqCst), "no disc");
         let mut d = disc();
         if let Some(releases) = self.releases.lock().unwrap().clone() {
             d.releases = releases;
         }
         Ok(d)
+    }
+
+    fn drive(&self) -> Option<String> {
+        (!self.no_drive.load(Ordering::SeqCst)).then(|| "HL-DT-ST BD-RE BP71N".into())
     }
 
     fn app_opened_on_insert(&self) -> Option<AutoOpen> {
@@ -595,4 +602,27 @@ fn no_rescan_without_a_server() {
     app.press("text:Rip CD").unwrap();
     app.wait_for("text:Perfect rip").unwrap();
     assert!(fake.rescanned.lock().unwrap().is_empty());
+}
+
+#[test]
+fn recommends_a_drive_until_one_is_plugged_in() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    fake.no_drive.store(true, Ordering::SeqCst);
+    let mut app = start_with(fake.clone(), &[]);
+    app.wait_for("text:Connect a CD drive").unwrap();
+    assert!(app.shows("Tested with CDR: LG BP71N"));
+    fake.no_drive.store(false, Ordering::SeqCst);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+}
+
+#[test]
+fn a_drive_without_a_disc_asks_for_one() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    fake.ejected.store(true, Ordering::SeqCst);
+    let mut app = start_with(fake, &[]);
+    app.wait_for("text:Insert an audio CD").unwrap();
+    app.wait(std::time::Duration::from_secs(3)).unwrap();
+    assert!(!app.shows("Connect a CD drive"));
 }

@@ -269,7 +269,16 @@ Every filed album gets two records of the same facts.
 - Secure mode's behaviour on damaged discs is covered by simulated-fault tests
   only.
 
-## 8. Mac app settings
+## 8. Mac app
+
+### 8.1 No drive
+
+Macs have no CD drive built in. While no optical drive is connected
+(`drutil list` lists none), the start screen asks for one and names the drives
+CDR is tested on (today the LG BP71N), adding that other USB drives work too.
+A drive with no disc gets the usual "Insert an audio CD".
+
+### 8.2 Settings
 
 Settings (⌘,) holds what most users set once. Each setting is saved as it
 changes and applies to the next rip.

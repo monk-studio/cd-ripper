@@ -98,6 +98,8 @@ pub fn App() -> impl IntoElement {
     // Another app the system opens on insert, which would read the disc too.
     let auto_open = signal(None::<AutoOpen>);
     let access_denied = signal(false);
+    // No optical drive at all: Macs have none built in.
+    let no_drive = signal(false);
     // The user's tags, over the chosen release; and the draft while editing.
     let edited = signal(None::<Release>);
     let editing = signal(None::<Release>);
@@ -170,6 +172,7 @@ pub fn App() -> impl IntoElement {
                 match blocking(|| backend().read_disc()).await {
                     Ok(Ok(found)) => {
                         access_denied.set(false);
+                        no_drive.set(false);
                         rows.set(rows_for(&found, found.releases.first()));
                         chosen.set(0);
                         picking.set(false);
@@ -178,7 +181,11 @@ pub fn App() -> impl IntoElement {
                         disc.set(Some(found));
                         phase.set(Phase::Ready);
                     }
-                    Ok(Err(e)) => access_denied.set(is_access_denied(&e)),
+                    Ok(Err(e)) => {
+                        access_denied.set(is_access_denied(&e));
+                        let missing = blocking(|| backend().drive().is_none()).await;
+                        no_drive.set(missing.unwrap_or(false));
+                    }
                     Err(_) => {}
                 }
             }
@@ -395,7 +402,7 @@ pub fn App() -> impl IntoElement {
         .child(
             when(
                 move || phase.get() == Phase::NoDisc,
-                move || waiting(library, access_denied),
+                move || waiting(library, access_denied, no_drive),
             )
             .otherwise(move || {
                 view()
@@ -470,8 +477,16 @@ pub fn App() -> impl IntoElement {
         )
 }
 
-/// No disc yet: what to do, and where the albums will go.
-fn waiting(library: Signal<Option<String>>, access_denied: Signal<bool>) -> impl IntoElement {
+/// Drives CDR is developed and tested on, recommended when none is connected.
+const TESTED_DRIVES: &[&str] = &["LG BP71N"];
+
+/// No disc yet: what to do, and where the albums will go. Without a drive,
+/// which drive to get.
+fn waiting(
+    library: Signal<Option<String>>,
+    access_denied: Signal<bool>,
+    no_drive: Signal<bool>,
+) -> impl IntoElement {
     view()
         .flex_1()
         .items_center()
@@ -480,17 +495,55 @@ fn waiting(library: Signal<Option<String>>, access_denied: Signal<bool>) -> impl
         .p(px(24.0))
         .child(icon(icons::DISC, 104.0).text_color(color::MUTED))
         .child(
-            text(move || t!("start.title"))
-                .text_size(px(22.0))
-                .font_weight(FontWeight::SEMIBOLD),
+            text(move || {
+                if no_drive.get() {
+                    t!("start.no_drive.title")
+                } else {
+                    t!("start.title")
+                }
+            })
+            .text_size(px(22.0))
+            .font_weight(FontWeight::SEMIBOLD),
         )
         .child(
-            text(move || t!("start.subtitle"))
-                .max_w(px(420.0))
-                .text_center()
-                .text_size(px(14.0))
-                .text_color(color::MUTED),
+            text(move || {
+                if no_drive.get() {
+                    t!("start.no_drive.subtitle")
+                } else {
+                    t!("start.subtitle")
+                }
+            })
+            .max_w(px(440.0))
+            .text_center()
+            .text_size(px(14.0))
+            .text_color(color::MUTED),
         )
+        .child(when(
+            move || no_drive.get(),
+            || {
+                view()
+                    .mt(px(6.0))
+                    .max_w(px(440.0))
+                    .px(px(16.0))
+                    .py(px(12.0))
+                    .gap(px(4.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(color::BORDER)
+                    .bg(color::STRIPE)
+                    .child(
+                        text(move || {
+                            t!("start.no_drive.tested", drives = TESTED_DRIVES.join(", "))
+                        })
+                        .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        text(move || t!("start.no_drive.others"))
+                            .text_size(px(12.0))
+                            .text_color(color::MUTED),
+                    )
+            },
+        ))
         .child(when(
             move || access_denied.get(),
             move || {

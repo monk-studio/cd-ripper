@@ -311,5 +311,21 @@
   "jellyfin.failed": {
     "en": "Saved, but Jellyfin didn't rescan: %{error}",
     "zh-CN": "已保存，但 Jellyfin 没有重新扫描：%{error}"
+  },
+  "start.no_drive.title": {
+    "en": "Connect a CD drive",
+    "zh-CN": "请连接 CD 光驱"
+  },
+  "start.no_drive.subtitle": {
+    "en": "Macs don't have a CD drive built in. Plug in a USB CD, DVD or Blu-ray drive and CDR finds it on its own.",
+    "zh-CN": "Mac 没有内置光驱。接上一台 USB 的 CD、DVD 或蓝光光驱，CDR 会自动找到它。"
+  },
+  "start.no_drive.tested": {
+    "en": "Tested with CDR: %{drives}",
+    "zh-CN": "CDR 实测过的光驱：%{drives}"
+  },
+  "start.no_drive.others": {
+    "en": "Other USB drives work too. CDR finds each drive's read offset from AccurateRip's list of drives or from the discs you rip.",
+    "zh-CN": "其他 USB 光驱也能用。CDR 会从 AccurateRip 的光驱列表或你抓过的光盘中找出每台光驱的读取偏移。"
   }
 }

@@ -140,6 +140,13 @@ impl MacDrive {
         Ok(())
     }
 
+    /// The model of the first optical drive connected, disc or not; `None`
+    /// when there is none.
+    pub fn connected_drive() -> Option<String> {
+        let out = Command::new("drutil").arg("list").output().ok()?;
+        first_listed_drive(&String::from_utf8_lossy(&out.stdout))
+    }
+
     /// Finds the BSD device of the disc in the first optical drive.
     pub fn find_device() -> anyhow::Result<String> {
         let out = Command::new("drutil")
@@ -152,6 +159,20 @@ impl MacDrive {
             .map(str::to_owned)
             .ok_or_else(|| anyhow::anyhow!("no disc found in any optical drive (drutil status)"))
     }
+}
+
+/// The vendor and product of the first drive in `drutil list`, whose rows
+/// are `1  HL-DT-ST BD-RE BP71N  1.03  USB  Unsupported` under a header.
+fn first_listed_drive(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| {
+        l.split_whitespace()
+            .next()
+            .is_some_and(|w| w.parse::<u32>().is_ok())
+    })?;
+    let mut words: Vec<&str> = line.split_whitespace().skip(1).collect();
+    // Revision, bus and support level.
+    words.truncate(words.len().saturating_sub(3));
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 fn drutil_model() -> Option<String> {
@@ -260,5 +281,18 @@ mod tests {
         assert_eq!(DKIOCCDREADTOC, 0xc018_6464);
         assert_eq!(DKIOCCDSETSPEED, 0x8002_6463);
         assert_eq!(DKIOCCDGETSPEED, 0x4002_6463);
+    }
+
+    #[test]
+    fn reads_the_first_drive_from_drutil_list() {
+        let list = "   Vendor   Product           Rev   Bus       SupportLevel\n\
+                    1  HL-DT-ST BD-RE BP71N       1.03  USB       Unsupported\n";
+        assert_eq!(
+            first_listed_drive(list).as_deref(),
+            Some("HL-DT-ST BD-RE BP71N")
+        );
+        let none = "   Vendor   Product           Rev   Bus       SupportLevel\n";
+        assert_eq!(first_listed_drive(none), None);
+        assert_eq!(first_listed_drive(""), None);
     }
 }

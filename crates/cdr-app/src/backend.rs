@@ -42,6 +42,10 @@ pub trait Backend: Send + Sync {
     /// disc (yet) or a failed lookup.
     fn read_disc(&self) -> anyhow::Result<Disc>;
 
+    /// The optical drive connected, disc or not, by model; `None` when there
+    /// is none. Blocking.
+    fn drive(&self) -> Option<String>;
+
     /// Rips `disc` as `request` says. Blocking; `on_event` reports progress.
     fn rip(
         &self,
@@ -107,6 +111,13 @@ impl Backend for Real {
             toc,
             releases,
         })
+    }
+
+    fn drive(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        return cdr_core::drive::macos::MacDrive::connected_drive();
+        #[cfg(not(target_os = "macos"))]
+        None
     }
 
     fn rip(
