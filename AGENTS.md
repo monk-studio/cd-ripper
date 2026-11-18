@@ -19,8 +19,10 @@ first). It runs `asc publish-web cdr --skip-upload` (the `asc` CLI,
 `~/@monk-studio/asc`), which packages the app with `nsh package`, signs it
 with Developer ID and the hardened runtime, and notarizes and staples the app
 and its DMG with the App Store Connect API key from `asc login`. Then it
-publishes the DMG as GitLab release `v<version>` and updates the Homebrew
-cask in `Casks/cdr.rb` (this repo is also the tap). The repo is public.
+publishes the DMG as GitHub release `v<version>` (`gh`) and updates
+`Casks/cdr.rb` in the Homebrew tap, github.com/monk-studio/homebrew-tap,
+checked out at `../homebrew-tap`. The repo is public on GitHub
+(github.com/monk-studio/cd-ripper); use `gh` for it.
 
 The bundle id is `com.monk-studio.cdr`; don't change it after a release,
 since permissions and settings are tied to it.

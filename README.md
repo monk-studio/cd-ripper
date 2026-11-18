@@ -30,13 +30,13 @@ need to know about read offsets or C2 errors to get a perfect copy.
 With Homebrew (macOS 14+):
 
 ```sh
-brew tap monk-studio/cd-ripper https://gitlab.com/monk-studio/cd-ripper
-brew trust monk-studio/cd-ripper
-brew install --cask monk-studio/cd-ripper/cdr
+brew tap monk-studio/tap
+brew trust monk-studio/tap
+brew install --cask monk-studio/tap/cdr
 ```
 
 Or download the DMG from
-[Releases](https://gitlab.com/monk-studio/cd-ripper/-/releases). It is signed
+[Releases](https://github.com/monk-studio/cd-ripper/releases). It is signed
 and notarized.
 
 You'll need a USB CD, DVD or Blu-ray drive: Macs don't have one built in.
@@ -66,6 +66,5 @@ crates/cdr-cli    the `cdr` command
 crates/cdr-app    the Mac app (NSH)
 docs/vision.md    what CDR promises
 docs/spec.md      what the ripper does and why
-release.sh        notarized build, GitLab release, Homebrew cask
-Casks/cdr.rb      Homebrew cask (this repo is also the tap)
+release.sh        notarized build, GitHub release, Homebrew cask
 ```
