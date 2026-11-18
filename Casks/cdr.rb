@@ -1,6 +1,6 @@
 cask "cdr" do
-  version "0.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "0.1.0"
+  sha256 "fabefa669a42283f9dbe8763698b395c463414b7d846b02bd1500dbf8007e1a5"
 
   url "https://gitlab.com/monk-studio/cd-ripper/-/releases/v#{version}/downloads/CDR-#{version}.dmg"
   name "CDR"
