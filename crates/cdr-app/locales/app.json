@@ -61,8 +61,8 @@
     "zh-CN": "%{total} 轨全部与 AccurateRip 一致"
   },
   "verdict.verified": {
-    "en": "%{accurate} of %{total} tracks match AccurateRip, the rest read the same twice",
-    "zh-CN": "%{total} 轨中 %{accurate} 轨与 AccurateRip 一致，其余两次读取一致"
+    "en": "All %{total} tracks read the same twice. AccurateRip doesn't have this pressing yet.",
+    "zh-CN": "%{total} 轨都两次读取一致。AccurateRip 还没有收录这个压制版本。"
   },
   "verdict.check": {
     "en": "Reads didn't agree in places on tracks %{tracks}",
@@ -339,5 +339,17 @@
   "rip.stopped": {
     "en": "Stopped. Nothing from this rip was kept in the library.",
     "zh-CN": "已停止。这次抓取的文件都没有留在曲库里。"
+  },
+  "verdict.unconfirmed": {
+    "en": "AccurateRip knows this disc but not the audio on tracks %{tracks}",
+    "zh-CN": "AccurateRip 收录了这张盘，但第 %{tracks} 轨的音频对不上"
+  },
+  "verdict.separator": {
+    "en": "; ",
+    "zh-CN": "；"
+  },
+  "track.unconfirmed": {
+    "en": "Not in AccurateRip",
+    "zh-CN": "AccurateRip 对不上"
   }
 }

@@ -144,11 +144,13 @@ impl TrackReport {
         }
     }
 
-    fn result(&self, in_database: bool) -> &'static str {
+    /// `disc_matched`: some track on the disc matched AccurateRip.
+    fn result(&self, in_database: bool, disc_matched: bool) -> &'static str {
         match (self.accuraterip, self.suspicious.is_empty()) {
             (Some(m), _) if m.pressing_offset.is_some() => "accurate, other pressing",
             (Some(_), _) => "accurate",
             (None, false) => "SUSPICIOUS",
+            (None, true) if disc_matched => "CHECK, other tracks match AccurateRip",
             (None, true) if in_database => "secure, not in AccurateRip's pressings",
             (None, true) => "secure",
         }
@@ -156,48 +158,69 @@ impl TrackReport {
 }
 
 impl RipReport {
-    pub fn verdict(&self) -> (Verdict, String) {
-        let total = self.tracks.len();
-        let accurate = self
-            .tracks
-            .iter()
-            .filter(|t| t.accuraterip.is_some())
-            .count();
-        let suspicious: Vec<String> = self
-            .tracks
+    /// Some track matched AccurateRip: this disc's pressing is in it.
+    pub fn disc_matched(&self) -> bool {
+        self.tracks.iter().any(|t| t.accuraterip.is_some())
+    }
+
+    /// Tracks whose reads didn't agree in places.
+    pub fn suspicious_tracks(&self) -> Vec<u8> {
+        self.tracks
             .iter()
             .filter(|t| !t.suspicious.is_empty())
-            .map(|t| t.number.to_string())
-            .collect();
-        if !suspicious.is_empty() {
-            let which = if suspicious.len() == 1 {
-                "track"
-            } else {
-                "tracks"
-            };
-            return (
-                Verdict::Check,
-                format!(
-                    "Check {which} {}: reads didn't agree in places",
-                    suspicious.join(", ")
-                ),
-            );
+            .map(|t| t.number)
+            .collect()
+    }
+
+    /// Tracks that read the same twice but match no pressing, on a disc whose
+    /// other tracks do match AccurateRip. Pressings differ across a whole
+    /// disc, not one track, so a lone mismatch is more likely a misread the
+    /// drive repeats than a different pressing.
+    pub fn unconfirmed_tracks(&self) -> Vec<u8> {
+        if !self.disc_matched() {
+            return Vec::new();
         }
-        if accurate == total {
+        self.tracks
+            .iter()
+            .filter(|t| t.accuraterip.is_none() && t.suspicious.is_empty())
+            .map(|t| t.number)
+            .collect()
+    }
+
+    pub fn verdict(&self) -> (Verdict, String) {
+        let total = self.tracks.len();
+        let list = |tracks: &[u8]| {
+            let numbers: Vec<String> = tracks.iter().map(u8::to_string).collect();
+            let which = if tracks.len() == 1 { "track" } else { "tracks" };
+            format!("{which} {}", numbers.join(", "))
+        };
+        let (suspicious, unconfirmed) = (self.suspicious_tracks(), self.unconfirmed_tracks());
+        let mut problems = Vec::new();
+        if !suspicious.is_empty() {
+            problems.push(format!(
+                "{}: reads didn't agree in places",
+                list(&suspicious)
+            ));
+        }
+        if !unconfirmed.is_empty() {
+            problems.push(format!(
+                "{}: AccurateRip knows this disc but not this audio",
+                list(&unconfirmed)
+            ));
+        }
+        if !problems.is_empty() {
+            return (Verdict::Check, format!("Check {}", problems.join("; ")));
+        }
+        if self.disc_matched() {
             return (
                 Verdict::Perfect,
                 format!("Perfect: all {total} tracks match AccurateRip"),
             );
         }
-        let secure = total - accurate;
-        let text = match accurate {
-            0 => format!("Verified: all {total} tracks read the same twice"),
-            1 => format!("Verified: 1 track matches AccurateRip, {secure} read the same twice"),
-            _ => format!(
-                "Verified: {accurate} tracks match AccurateRip, {secure} read the same twice"
-            ),
-        };
-        (Verdict::Verified, text)
+        (
+            Verdict::Verified,
+            format!("Verified: all {total} tracks read the same twice"),
+        )
     }
 
     pub fn to_json(&self) -> String {
@@ -260,6 +283,7 @@ impl RipReport {
                 .into(),
         );
         let in_db = self.accuraterip_submissions.is_some();
+        let disc_matched = self.disc_matched();
         for t in &self.tracks {
             let ar = t
                 .accuraterip
@@ -288,7 +312,7 @@ impl RipReport {
                 ar,
                 reads,
                 c2,
-                t.result(in_db)
+                t.result(in_db, disc_matched)
             ));
         }
         let suspicious: Vec<_> = self
@@ -425,13 +449,39 @@ mod tests {
             )
         );
 
-        let verified = report(&[rip(Some((40, "v2")), 1, vec![]), rip(None, 2, vec![])]);
+        // A pressing AccurateRip doesn't have: no track matches, all read the same twice.
+        let verified = report(&[rip(None, 2, vec![]), rip(None, 2, vec![])]);
         assert_eq!(
             verified.verdict(),
             (
                 Verdict::Verified,
-                "Verified: 1 track matches AccurateRip, 1 read the same twice".into()
+                "Verified: all 2 tracks read the same twice".into()
             )
+        );
+
+        // The disc's pressing is in AccurateRip, but track 2 matches none of it.
+        let lone = report(&[rip(Some((40, "v2")), 1, vec![]), rip(None, 2, vec![])]);
+        assert_eq!(
+            lone.verdict(),
+            (
+                Verdict::Check,
+                "Check track 2: AccurateRip knows this disc but not this audio".into()
+            )
+        );
+        assert_eq!(lone.unconfirmed_tracks(), [2]);
+        assert!(
+            lone.to_text()
+                .contains("CHECK, other tracks match AccurateRip")
+        );
+
+        let both = report(&[
+            rip(Some((40, "v2")), 1, vec![]),
+            rip(None, 2, vec![]),
+            rip(None, 2, vec![588 * 75]),
+        ]);
+        assert_eq!(
+            both.verdict().1,
+            "Check track 3: reads didn't agree in places; track 2: AccurateRip knows this disc but not this audio"
         );
 
         let check = report(&[rip(None, 2, vec![588 * 75 * 113]), rip(None, 2, vec![])]);

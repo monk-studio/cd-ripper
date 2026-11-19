@@ -131,12 +131,20 @@ silently uses 0, which left its files 6 samples off (CDR-4).
 | Verdict | When |
 |---|---|
 | **Perfect** | Every track matches AccurateRip. |
-| **Verified** | No track is suspicious, and the tracks AccurateRip didn't confirm read identically twice in secure mode. |
-| **Check** | At least one track has suspicious positions. The verdict names the tracks. |
+| **Verified** | No track matches AccurateRip (the disc isn't in it, or its pressing isn't), and every track read identically twice. |
+| **Check** | A track has suspicious positions; or some tracks match AccurateRip and another, though it read the same twice, matches no pressing. The verdict names the tracks and why. |
+
+*Why the second Check:* pressings differ across a whole disc, not on one
+track. When the rest of the disc lines up with AccurateRip, a lone track that
+doesn't is more likely a misread the drive repeats than a different pressing,
+and two identical reads can't tell those apart. When no track matches, an
+unknown pressing is the likely reason, and two identical reads are the best
+evidence there is.
 
 Per track the result is `accurate`, `accurate, other pressing`, `secure`,
-`secure, not in AccurateRip's pressings` (the disc is in the database but this
-track matched no pressing), or `SUSPICIOUS`.
+`secure, not in AccurateRip's pressings` (the disc is in the database but no
+track matched a pressing), `CHECK, other tracks match AccurateRip` (the second
+Check above), or `SUSPICIOUS`.
 
 ## 3. Metadata
 
@@ -266,7 +274,7 @@ Every filed album gets two records of the same facts.
 | AccurateRip | Agreed with Illustrate (2026-11-10, CDR-2): free while CDR is donation-funded, a $250–500/year licence if sold. Identify via User-Agent, cache where possible, **never submit**. The drive database is cached for 30 days. Each disc's entry is cached in `accuraterip/` in CDR's data folder: reused for 30 days, or 7 days when the disc wasn't in the database; when AccurateRip can't be reached, an older entry is used. |
 | MusicBrainz | One request per disc. On 503, back off 2, 4 and 8 s. |
 | Cover Art Archive | Thumbnails only (1200 px); originals can be tens of MB. |
-| CTDB | Not used yet; awaiting the maintainer's reply (CDR-2). |
+| CTDB | Not used: AccurateRip is enough (decided 2026-11-19, CDR-2). |
 
 ## 7. Known limitations
 
@@ -278,9 +286,9 @@ Every filed album gets two records of the same facts.
   secure-mode time on a BP71N).
 - HTOA, CD-Text, ISRC and pre-emphasis are not handled; pre-emphasis is only
   shown in the TOC (CDR-5).
-- A track that AccurateRip knows but no pressing matches is still "Verified"
-  if it reads identically twice. That covers both an unknown pressing and a
-  drive that misreads consistently.
+- A disc whose pressing isn't in AccurateRip can only be "Verified" by two
+  identical reads, which a drive that misreads the same way twice would also
+  pass.
 - Memory: the rip holds about two copies of the track it's on (three in
   secure mode, which compares two reads): about 100 MB above idle for a
   5-minute track, 150 MB in secure mode (CDR-12).

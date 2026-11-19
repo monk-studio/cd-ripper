@@ -11,8 +11,8 @@ folder layouts to get there.
 
 ## What we promise
 
-- **Accurate.** Every track comes with evidence: checked against AccurateRip
-  (CTDB later), with a log anyone can re-check. When a rip isn't certain, CDR
+- **Accurate.** Every track comes with evidence: checked against
+  AccurateRip, with a log anyone can re-check. When a rip isn't certain, CDR
   says which tracks to check; it never claims a perfect rip it can't prove.
 - **Fast.** At the same accuracy, never slower than XLD's default settings.
   Speed never comes at the cost of accuracy.

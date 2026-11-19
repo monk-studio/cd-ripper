@@ -379,6 +379,16 @@ pub fn App() -> impl IntoElement {
                 match work.await {
                     Ok(Ok(report)) => {
                         let (verdict, text) = verdict_line(&report);
+                        // Known only once the whole disc is read: tracks that
+                        // read the same twice but match no pressing of a disc
+                        // AccurateRip has.
+                        let unconfirmed = report.unconfirmed_tracks();
+                        rows.update(|rows| {
+                            for row in rows.iter_mut().filter(|r| unconfirmed.contains(&r.number)) {
+                                row.good = false;
+                                row.status = t!("track.unconfirmed");
+                            }
+                        });
                         let took = started.get().map(|s| s.elapsed()).unwrap_or_default();
                         let sectors: u32 = rows.get().iter().map(|r| r.sectors).sum();
                         // What the library server said (the rip asked it to rescan).
@@ -1641,23 +1651,28 @@ fn status(t: &TrackReport) -> String {
 /// The disc's verdict in the app's language ([`RipReport::verdict`] decides it).
 fn verdict_line(report: &RipReport) -> (Verdict, String) {
     let total = report.tracks.len();
-    let accurate = report
-        .tracks
-        .iter()
-        .filter(|t| t.accuraterip.is_some())
-        .count();
     let verdict = report.verdict().0;
+    let list = |tracks: Vec<u8>| {
+        tracks
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let text = match verdict {
         Verdict::Perfect => t!("verdict.perfect", total = total),
-        Verdict::Verified => t!("verdict.verified", accurate = accurate, total = total),
+        Verdict::Verified => t!("verdict.verified", total = total),
         Verdict::Check => {
-            let tracks: Vec<String> = report
-                .tracks
-                .iter()
-                .filter(|t| !t.suspicious.is_empty())
-                .map(|t| t.number.to_string())
-                .collect();
-            t!("verdict.check", tracks = tracks.join(", "))
+            let mut parts = Vec::new();
+            let suspicious = report.suspicious_tracks();
+            if !suspicious.is_empty() {
+                parts.push(t!("verdict.check", tracks = list(suspicious)));
+            }
+            let unconfirmed = report.unconfirmed_tracks();
+            if !unconfirmed.is_empty() {
+                parts.push(t!("verdict.unconfirmed", tracks = list(unconfirmed)));
+            }
+            parts.join(t!("verdict.separator").as_str())
         }
     };
     (verdict, text)

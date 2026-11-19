@@ -78,6 +78,10 @@ struct Fake {
     no_drive: AtomicBool,
     /// The rip runs until it is stopped.
     endless: AtomicBool,
+    /// Tracks (0-based) that match no AccurateRip pressing but read the same
+    /// twice; `all_unmatched` for every track.
+    unmatched: Mutex<Vec<usize>>,
+    all_unmatched: AtomicBool,
     /// What the system opens on insert.
     auto_open: Mutex<Option<AutoOpen>>,
     /// Replaces the disc's MusicBrainz releases.
@@ -174,7 +178,9 @@ impl Backend for Fake {
                 audio_md5: String::new(),
                 crc_v1: String::new(),
                 crc_v2: String::new(),
-                accuraterip: Some(ArMatch {
+                accuraterip: (!self.all_unmatched.load(Ordering::SeqCst)
+                    && !self.unmatched.lock().unwrap().contains(&n))
+                .then_some(ArMatch {
                     confidence: 40,
                     version: "v2",
                     pressing_offset: None,
@@ -674,4 +680,33 @@ fn a_rip_can_be_stopped_and_started_again() {
     app.press("text:Rip CD").unwrap();
     app.wait_for("text:Perfect rip").unwrap();
     assert!(!app.shows("Nothing from this rip was kept"));
+}
+
+#[test]
+fn a_lone_track_accuraterip_doesnt_know_is_flagged() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    *fake.unmatched.lock().unwrap() = vec![1];
+    let lib = library();
+    let mut app = start_with(fake, &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Check the rip").unwrap();
+    assert!(app.shows("Not in AccurateRip"));
+    app.wait_for("text:/AccurateRip knows this disc but not the audio on tracks 2/")
+        .unwrap();
+}
+
+#[test]
+fn a_pressing_accuraterip_lacks_is_verified() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    fake.all_unmatched.store(true, Ordering::SeqCst);
+    let lib = library();
+    let mut app = start_with(fake, &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:/AccurateRip doesn't have this pressing yet/")
+        .unwrap();
+    assert!(!app.shows("Not in AccurateRip"));
 }
