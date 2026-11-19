@@ -152,9 +152,10 @@ impl<'a> Ripper<'a> {
         let extract = |pcm: &[u8]| extract_at(pcm, 0);
         let pressings = self.pressing_offsets.clone();
         let drive_offset = self.offset;
-        // Checksums of the output (drive offset); a match there, else at another pressing's alignment.
-        let verify_pcm = |pcm: &[u8]| {
-            let sums = accuraterip::checksums(&extract(pcm), first, last);
+        // Checksums of the output (`samples`, at the drive offset); a match
+        // there, else at another pressing's alignment.
+        let verify_pcm = |pcm: &[u8], samples: &[u32]| {
+            let sums = accuraterip::checksums(samples, first, last);
             let Some(subs) = db else {
                 return (sums, None, None);
             };
@@ -176,7 +177,7 @@ impl<'a> Ripper<'a> {
 
         let first_pass = self.read_reporting(lo, hi, |d| progress(d, count * 2));
         let samples = extract(&first_pass.pcm);
-        let (checksums, accurate, pressing_offset) = verify_pcm(&first_pass.pcm);
+        let (checksums, accurate, pressing_offset) = verify_pcm(&first_pass.pcm, &samples);
         let c2 = first_pass
             .c2_supported
             .then(|| first_pass.bad.iter().any(|&b| b));
@@ -198,7 +199,9 @@ impl<'a> Ripper<'a> {
         // Secure mode: a second full read from the disc surface, not the cache.
         self.flush_cache(lo, hi);
         let second_pass = self.read_reporting(lo, hi, |d| progress(count + d, count * 2));
-        let mut pcm = second_pass.pcm.clone();
+        // The first read's samples were for checking it; the reads themselves
+        // are compared sector by sector below.
+        drop(samples);
         // Per unsettled sector: every reading so far (data, was it clean).
         let mut history: HashMap<usize, Vec<(Vec<u8>, bool)>> = HashMap::new();
         for k in 0..count as usize {
@@ -214,6 +217,18 @@ impl<'a> Ripper<'a> {
                 );
             }
         }
+        // Only the second read is kept; the sectors that differ are in `history`.
+        let Reading {
+            mut pcm,
+            bad: second_bad,
+            c2_supported: second_c2,
+        } = second_pass;
+        let Reading {
+            pcm: first_pcm,
+            bad: first_bad,
+            c2_supported: first_c2,
+        } = first_pass;
+        drop(first_pcm);
         let reread_sectors = history.len() as u32;
 
         let mut slowed_down = false;
@@ -271,9 +286,8 @@ impl<'a> Ripper<'a> {
         suspicious.dedup();
 
         let samples = extract(&pcm);
-        let (checksums, accurate, pressing_offset) = verify_pcm(&pcm);
-        let c2 = (first_pass.c2_supported || second_pass.c2_supported)
-            .then(|| first_pass.bad.iter().chain(&second_pass.bad).any(|&b| b));
+        let (checksums, accurate, pressing_offset) = verify_pcm(&pcm, &samples);
+        let c2 = (first_c2 || second_c2).then(|| first_bad.iter().chain(&second_bad).any(|&b| b));
         TrackRip {
             samples,
             checksums,
@@ -288,9 +302,10 @@ impl<'a> Ripper<'a> {
     }
 
     fn read_reporting(&mut self, lo: i64, hi: i64, mut progress: impl FnMut(u32)) -> Reading {
+        let sectors = (hi - lo).max(0) as usize;
         let mut out = Reading {
-            pcm: Vec::new(),
-            bad: Vec::new(),
+            pcm: Vec::with_capacity(sectors * SECTOR_BYTES),
+            bad: Vec::with_capacity(sectors),
             c2_supported: false,
         };
         let mut at = lo;

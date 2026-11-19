@@ -159,6 +159,11 @@ track matched no pressing), or `SUSPICIOUS`.
   (4096). Decoders use it to find sample positions, and `flac -t` flags
   every frame otherwise.
 - Cover embedded as the front-cover picture.
+- Metadata order: STREAMINFO, tags, cover, 1 KB of padding.
+- Reproducible: the same audio and tags always give the same bytes (tags
+  are written in the order of the table below).
+- Encoded a batch of frames at a time on every core and written as they're
+  done, so only the track's samples and one batch are in memory.
 
 ### 4.2 Tags
 
@@ -271,7 +276,9 @@ Every filed album gets two records of the same facts.
 - A track that AccurateRip knows but no pressing matches is still "Verified"
   if it reads identically twice. That covers both an unknown pressing and a
   drive that misreads consistently.
-- Peak memory is 670–820 MB, mostly FLAC encoding copies (CDR-12).
+- Memory: the rip holds about two copies of the track it's on (three in
+  secure mode, which compares two reads): about 100 MB above idle for a
+  5-minute track, 150 MB in secure mode (CDR-12).
 - Secure mode's behaviour on damaged discs is covered by simulated-fault tests
   only.
 
