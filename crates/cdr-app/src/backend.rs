@@ -31,6 +31,8 @@ pub struct RipRequest {
     pub offset: Option<i32>,
     /// Set to stop the rip; it then fails with [`album::Stopped`].
     pub stop: Arc<AtomicBool>,
+    /// Told to rescan once the album is filed; the report says how it went.
+    pub server: Option<Server>,
 }
 
 /// A Jellyfin server to tell about new albums.
@@ -73,10 +75,6 @@ pub trait Backend: Send + Sync {
     /// The server's music libraries: whether its address and key work.
     /// Blocking.
     fn check_server(&self, server: &Server) -> anyhow::Result<Vec<String>>;
-
-    /// Has the server rescan its music libraries; returns their names.
-    /// Blocking.
-    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>>;
 }
 
 /// The Keychain item the Jellyfin API key is kept in.
@@ -138,6 +136,14 @@ impl Backend for Real {
             offset: request.offset,
             secure: request.secure,
             stop: Some(request.stop),
+            servers: request
+                .server
+                .map(|s| album::LibraryServer::Jellyfin {
+                    url: s.url,
+                    api_key: s.api_key,
+                })
+                .into_iter()
+                .collect(),
             data_dir: cdr_core::offsets::data_dir(),
         };
         album::rip(drive.as_mut(), plan, on_event)
@@ -225,10 +231,6 @@ impl Backend for Real {
 
     fn check_server(&self, server: &Server) -> anyhow::Result<Vec<String>> {
         cdr_core::jellyfin::Jellyfin::new(&server.url, &server.api_key).music_libraries()
-    }
-
-    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>> {
-        cdr_core::jellyfin::Jellyfin::new(&server.url, &server.api_key).scan_music()
     }
 }
 

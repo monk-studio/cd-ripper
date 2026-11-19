@@ -40,6 +40,35 @@ pub struct RipReport {
     /// Pressings in AccurateRip; `None` if the disc isn't in it.
     pub accuraterip_submissions: Option<usize>,
     pub tracks: Vec<TrackReport>,
+    /// The library servers told about the album once it was filed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub library_servers: Vec<ServerScan>,
+}
+
+/// What a library server said when asked to pick the album up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServerScan {
+    /// "Jellyfin" or "Navidrome".
+    pub server: String,
+    /// The libraries it's scanning (empty when it doesn't say).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scanning: Option<Vec<String>>,
+    /// Why it couldn't be asked; the files are in place regardless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ServerScan {
+    /// One line for people: "Jellyfin: scanning Music", or why not.
+    pub fn describe(&self) -> String {
+        match (&self.scanning, &self.error) {
+            (_, Some(e)) => format!("{}: not rescanned ({e})", self.server),
+            (Some(names), None) if !names.is_empty() => {
+                format!("{}: scanning {}", self.server, names.join(", "))
+            }
+            _ => format!("{}: scanning", self.server),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,6 +251,9 @@ impl RipReport {
                 None => "not in the database".into(),
             }
         ));
+        for scan in &self.library_servers {
+            line(format!("Library:       {}", scan.describe()));
+        }
         line(String::new());
         line(
             "Track  Start     Length    CRC v1    CRC v2    AccurateRip         Reads      C2   Result"
@@ -375,6 +407,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, r)| TrackReport::new(i as u8 + 1, i as u32 * 75, r))
                 .collect(),
+            library_servers: Vec::new(),
         }
     }
 
@@ -441,5 +474,38 @@ mod tests {
             rfc3339(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "2000-02-29T00:00:00Z"
         );
+    }
+
+    #[test]
+    fn the_log_says_what_the_library_servers_did() {
+        let mut r = report(&[]);
+        assert!(
+            !r.to_json().contains("library_servers"),
+            "left out when none"
+        );
+        r.library_servers = vec![
+            ServerScan {
+                server: "Jellyfin".into(),
+                scanning: Some(vec!["Music".into()]),
+                error: None,
+            },
+            ServerScan {
+                server: "Navidrome".into(),
+                scanning: None,
+                error: Some("connection refused".into()),
+            },
+        ];
+        let text = r.to_text();
+        assert!(
+            text.contains("Library:       Jellyfin: scanning Music"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Library:       Navidrome: not rescanned (connection refused)"),
+            "{text}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(json["library_servers"][0]["scanning"][0], "Music");
+        assert_eq!(json["library_servers"][1]["error"], "connection refused");
     }
 }

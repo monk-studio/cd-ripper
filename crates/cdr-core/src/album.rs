@@ -12,7 +12,7 @@ use crate::coverart::{self, Cover};
 use crate::drive::CdDrive;
 use crate::musicbrainz::{DiscToc, Release};
 use crate::offsets::{DriveDb, DriveStore, OffsetSource};
-use crate::report::{self, RipReport, TrackReport};
+use crate::report::{self, RipReport, ServerScan, TrackReport};
 use crate::rip::Ripper;
 use crate::tags::Tags;
 use crate::toc::Toc;
@@ -35,6 +35,56 @@ pub struct Plan<'a> {
     pub secure: bool,
     /// Set from another thread to stop the rip ([`Stopped`]).
     pub stop: Option<Arc<AtomicBool>>,
+    /// Told to rescan once the album is filed (not when nothing is filed).
+    pub servers: Vec<LibraryServer>,
+}
+
+/// A library server that picks new albums up when asked to rescan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryServer {
+    Jellyfin {
+        url: String,
+        api_key: String,
+    },
+    Navidrome {
+        url: String,
+        user: String,
+        password: String,
+    },
+}
+
+impl LibraryServer {
+    /// Asks it to rescan. Blocking; a failure is recorded, not returned:
+    /// the files are already in place.
+    pub fn rescan(&self) -> ServerScan {
+        let (server, result) = match self {
+            LibraryServer::Jellyfin { url, api_key } => (
+                "Jellyfin",
+                crate::jellyfin::Jellyfin::new(url, api_key)
+                    .scan_music()
+                    .map(Some),
+            ),
+            LibraryServer::Navidrome {
+                url,
+                user,
+                password,
+            } => (
+                "Navidrome",
+                crate::navidrome::Navidrome::new(url, user, password)
+                    .start_scan()
+                    .map(|()| None),
+            ),
+        };
+        let (scanning, error) = match result {
+            Ok(names) => (names, None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+        ServerScan {
+            server: server.into(),
+            scanning,
+            error,
+        }
+    }
 }
 
 /// The rip was stopped before it finished. Nothing it wrote to the library
@@ -234,6 +284,7 @@ pub fn rip(
             accuraterip_disc_id: ids.name(),
             accuraterip_submissions: db.as_ref().map(Vec::len),
             tracks: Vec::new(),
+            library_servers: Vec::new(),
         };
         // The log sits with the first track; file paths in it are relative to it.
         let log_dir = plan
@@ -278,6 +329,11 @@ pub fn rip(
             report.tracks.push(entry);
         }
 
+        // Every track is in place: have the servers pick the album up, and
+        // say in the log how that went.
+        if !plan.dests.is_empty() {
+            report.library_servers = plan.servers.iter().map(LibraryServer::rescan).collect();
+        }
         report.date = report::rfc3339(std::time::SystemTime::now());
         if let Some(dir) = &log_dir {
             for (name, body) in [
@@ -371,6 +427,7 @@ mod tests {
             data_dir: Some(data),
             secure: false,
             stop: Some(stop.clone()),
+            servers: Vec::new(),
         };
         let mut first_filed = false;
         let result = rip(&mut Disc(toc.clone()), plan, |e| {

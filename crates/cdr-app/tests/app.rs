@@ -7,7 +7,7 @@ use cdr_app::backend::{AutoOpen, Backend, Disc, RipRequest, Server, set_backend}
 use cdr_core::album::Event;
 use cdr_core::musicbrainz::{Release, TrackMeta};
 use cdr_core::offsets::OffsetSource;
-use cdr_core::report::{ArMatch, RipReport, TrackReport};
+use cdr_core::report::{ArMatch, RipReport, ServerScan, TrackReport};
 use cdr_core::storage_keys;
 use cdr_core::toc::{Toc, Track};
 use nsh_engine::EngineConfig;
@@ -130,11 +130,6 @@ impl Backend for Fake {
         Ok(vec!["Music".into()])
     }
 
-    fn rescan(&self, server: &Server) -> anyhow::Result<Vec<String>> {
-        self.rescanned.lock().unwrap().push(server.clone());
-        self.check_server(server)
-    }
-
     fn eject(&self, _disc: &Disc) -> anyhow::Result<()> {
         self.ejected.store(true, Ordering::SeqCst);
         Ok(())
@@ -161,6 +156,7 @@ impl Backend for Fake {
             return Err(cdr_core::album::Stopped.into());
         }
         let dests = request.dests.clone();
+        let server = request.server.clone();
         let mut tracks = Vec::new();
         for (n, t) in disc.toc.tracks.iter().enumerate() {
             on_event(Event::Progress {
@@ -216,6 +212,24 @@ impl Backend for Fake {
             accuraterip_disc_id: String::new(),
             accuraterip_submissions: Some(1),
             tracks,
+            library_servers: server
+                .map(|server| {
+                    self.rescanned.lock().unwrap().push(server.clone());
+                    match self.check_server(&server) {
+                        Ok(names) => ServerScan {
+                            server: "Jellyfin".into(),
+                            scanning: Some(names),
+                            error: None,
+                        },
+                        Err(e) => ServerScan {
+                            server: "Jellyfin".into(),
+                            scanning: None,
+                            error: Some(e.to_string()),
+                        },
+                    }
+                })
+                .into_iter()
+                .collect(),
         })
     }
 }

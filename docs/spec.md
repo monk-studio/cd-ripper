@@ -228,8 +228,10 @@ After filing, optionally:
 - **Navidrome**: Subsonic `startScan`, with salted-token authentication (the
   password never travels). Only admin users may start scans.
 
-A failed rescan is reported but doesn't fail the rip: the files are already
-in place.
+Each server is asked once every track is filed, before the log is written,
+so the log says what it answered (§5). A failed rescan is recorded but doesn't
+fail the rip: the files are already in place. The CLI and the app do this the
+same way (`album::Plan::servers`).
 
 ## 5. Rip log
 
@@ -237,14 +239,16 @@ Every filed album gets two records of the same facts.
 
 - **`rip.log`**, for people: tool and date (UTC), drive, read offset and where
   it came from, the pressing offset when it differs, mode, release, disc IDs,
-  AccurateRip pressings; one line per track (start, length, CRC v1/v2,
+  AccurateRip pressings, what each library server said (`Library:  Jellyfin:
+  scanning Music`, or why it wasn't rescanned); one line per track (start, length, CRC v1/v2,
   AccurateRip match, with `@offset` for another pressing, reads, C2, result);
   suspicious positions; each file's audio MD5; the verdict.
 - **`rip.json`**, for tools, with `"format": 1`. Fields are only ever added;
   a change in meaning gets a new format number. `offset_source` is one of
   `manual`, `accurate-rip-drives`, `learned`, `this-disc`;
   `pressing_offset` (disc, and per AccurateRip match) is set when a pressing
-  lines up elsewhere.
+  lines up elsewhere. `library_servers` (left out when none were asked) has
+  `server` and either `scanning` (library names) or `error`.
 - The audio MD5 is the FLAC STREAMINFO MD5, so a file can be checked against
   the log years later.
 - Positions are written `m:ss.ff` (minutes, seconds, CD frames of 1/75 s).

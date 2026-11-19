@@ -69,6 +69,30 @@ impl PartialEq for StopFlag {
     }
 }
 
+/// A line shown above the footer.
+#[derive(Clone, PartialEq)]
+struct Note {
+    text: String,
+    /// Something went wrong (shown in red), rather than news.
+    problem: bool,
+}
+
+impl Note {
+    fn problem(text: String) -> Self {
+        Note {
+            text,
+            problem: true,
+        }
+    }
+
+    fn info(text: String) -> Self {
+        Note {
+            text,
+            problem: false,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 enum Phase {
     NoDisc,
@@ -116,7 +140,8 @@ pub fn App() -> impl IntoElement {
     let edited = signal(None::<Release>);
     let editing = signal(None::<Release>);
     let rows = signal(Vec::<Row>::new());
-    let message = signal(None::<String>);
+    // A line above the footer: a problem, or (Stop) just what happened.
+    let message = signal(None::<Note>);
     let offset_line = signal(String::new());
     let started = signal(None::<Instant>);
     // The running rip's stop flag; and whether Stop was pressed.
@@ -287,14 +312,14 @@ pub fn App() -> impl IntoElement {
         };
         let release = release();
         let Ok(offset) = settings.offset() else {
-            message.set(Some(t!("rip.bad_offset")));
+            message.set(Some(Note::problem(t!("rip.bad_offset"))));
             return;
         };
         if let Some(existing) = dests.iter().find(|p| p.exists()) {
-            message.set(Some(t!(
+            message.set(Some(Note::problem(t!(
                 "rip.already_in_library",
                 path = existing.display()
-            )));
+            ))));
             return;
         }
         message.set(None);
@@ -320,6 +345,7 @@ pub fn App() -> impl IntoElement {
                 secure: secure_now,
                 offset,
                 stop,
+                server,
             };
             backend().rip(&d, request, &mut |event| {
                 let _ = tx.send(event);
@@ -355,24 +381,21 @@ pub fn App() -> impl IntoElement {
                         let (verdict, text) = verdict_line(&report);
                         let took = started.get().map(|s| s.elapsed()).unwrap_or_default();
                         let sectors: u32 = rows.get().iter().map(|r| r.sectors).sum();
+                        // What the library server said (the rip asked it to rescan).
+                        rescanned.set(report.library_servers.first().map(
+                            |scan| match &scan.error {
+                                Some(e) => Err(e.clone()),
+                                None => Ok(scan.scanning.clone().unwrap_or_default()),
+                            },
+                        ));
                         phase.set(Phase::Done(verdict, text, how_it_went(took, sectors)));
-                        // Have the library server pick the album up.
-                        if let Some(server) = server {
-                            rescanned.set(Some(
-                                match blocking(move || backend().rescan(&server)).await {
-                                    Ok(Ok(names)) => Ok(names),
-                                    Ok(Err(e)) => Err(format!("{e:#}")),
-                                    Err(e) => Err(e.to_string()),
-                                },
-                            ));
-                        }
                     }
                     Ok(Err(e)) if album::is_stopped(&e) => {
                         // Back to where it was before Rip, with nothing kept.
                         if let Some(d) = disc.get() {
                             rows.set(rows_for(&d, shown.as_ref()));
                         }
-                        message.set(Some(t!("rip.stopped")));
+                        message.set(Some(Note::info(t!("rip.stopped"))));
                         phase.set(Phase::Ready);
                     }
                     Ok(Err(e)) => phase.set(Phase::Failed(format!("{e:#}"))),
@@ -408,10 +431,13 @@ pub fn App() -> impl IntoElement {
                         picking.set(false);
                         phase.set(Phase::NoDisc);
                     }
-                    Ok(Err(e)) => {
-                        message.set(Some(t!("action.eject_failed", error = format!("{e:#}"))))
+                    Ok(Err(e)) => message.set(Some(Note::problem(t!(
+                        "action.eject_failed",
+                        error = format!("{e:#}")
+                    )))),
+                    Err(e) => {
+                        message.set(Some(Note::problem(t!("action.eject_failed", error = e))))
                     }
-                    Err(e) => message.set(Some(t!("action.eject_failed", error = e))),
                 }
             })
         });
@@ -490,11 +516,17 @@ pub fn App() -> impl IntoElement {
                     .child(when(
                         move || message.get().is_some(),
                         move || {
-                            text(move || message.get().unwrap_or_default())
+                            text(move || message.get().map(|n| n.text).unwrap_or_default())
                                 .px(px(24.0))
                                 .py(px(8.0))
                                 .text_size(px(12.0))
-                                .text_color(color::BAD)
+                                .text_color(move || {
+                                    if message.get().is_some_and(|n| n.problem) {
+                                        color::BAD
+                                    } else {
+                                        color::MUTED
+                                    }
+                                })
                         },
                     ))
                     .child(footer(

@@ -138,6 +138,24 @@ fn main() -> anyhow::Result<()> {
     let numbers: Vec<u8> = toc.audio_tracks().map(|t| t.number).collect();
     let filing = !dests.is_empty();
     let mut in_db = false;
+    let mut servers = Vec::new();
+    if let (Some(url), Some(api_key)) = (&args.jellyfin_url, &args.jellyfin_api_key) {
+        servers.push(album::LibraryServer::Jellyfin {
+            url: url.clone(),
+            api_key: api_key.clone(),
+        });
+    }
+    if let (Some(url), Some(user), Some(password)) = (
+        &args.navidrome_url,
+        &args.navidrome_user,
+        &args.navidrome_password,
+    ) {
+        servers.push(album::LibraryServer::Navidrome {
+            url: url.clone(),
+            user: user.clone(),
+            password: password.clone(),
+        });
+    }
     let plan = album::Plan {
         toc: &toc,
         release,
@@ -147,6 +165,7 @@ fn main() -> anyhow::Result<()> {
         secure: args.secure,
         data_dir: cdr_core::offsets::data_dir(),
         stop: None,
+        servers,
     };
     let report = album::rip(drive.as_mut(), plan, |event| match event {
         Event::AccurateRip(Some(n)) => {
@@ -197,23 +216,10 @@ fn main() -> anyhow::Result<()> {
     println!("Result: {}", report.verdict().1);
 
     // The files are already in the library; a failed scan only delays them showing up.
-    if let (Some(url), Some(key), false) =
-        (&args.jellyfin_url, &args.jellyfin_api_key, dests.is_empty())
-    {
-        match cdr_core::jellyfin::Jellyfin::new(url, key).scan_music() {
-            Ok(names) => println!("Jellyfin: scanning {}", names.join(", ")),
-            Err(e) => eprintln!("  Jellyfin scan failed: {e}"),
-        }
-    }
-    if let (Some(url), Some(user), Some(password), false) = (
-        &args.navidrome_url,
-        &args.navidrome_user,
-        &args.navidrome_password,
-        dests.is_empty(),
-    ) {
-        match cdr_core::navidrome::Navidrome::new(url, user, password).start_scan() {
-            Ok(()) => println!("Navidrome: scanning"),
-            Err(e) => eprintln!("  Navidrome scan failed: {e}"),
+    for scan in &report.library_servers {
+        match &scan.error {
+            Some(_) => eprintln!("{}", scan.describe()),
+            None => println!("{}", scan.describe()),
         }
     }
     Ok(())
