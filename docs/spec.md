@@ -208,7 +208,9 @@ Without a release only the track numbering and the disc ID are written.
 - Files are encoded in a local temporary folder, then copied into the library
   as a hidden `.<name>.part` file and renamed into place. The copy is retried
   3 times (1 s, then 2 s apart); a final failure leaves no partial file.
-- **Stopping.** A rip can be stopped (the Mac app's Stop button). Reads
+- **Stopping.** A rip can be stopped: the Mac app's Stop button, or Ctrl-C
+  in the CLI (a second Ctrl-C quits at once, without cleaning up; exit code
+  130). Reads
   stop within one 32-sector read, the track in progress is thrown away, and
   everything the rip put into the library is removed: the tracks filed so
   far, a cover it added, and the folders it created if they are left empty.

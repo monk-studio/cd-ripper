@@ -12,3 +12,6 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 cdr-core = { path = "../cdr-core" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

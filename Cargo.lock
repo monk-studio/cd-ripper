@@ -114,6 +114,7 @@ dependencies = [
  "anyhow",
  "cdr-core",
  "clap",
+ "libc",
 ]
 
 [[package]]

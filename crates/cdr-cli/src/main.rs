@@ -164,7 +164,7 @@ fn main() -> anyhow::Result<()> {
         offset: args.offset,
         secure: args.secure,
         data_dir: cdr_core::offsets::data_dir(),
-        stop: None,
+        stop: Some(stop_on_ctrl_c()),
         servers,
     };
     let report = album::rip(drive.as_mut(), plan, |event| match event {
@@ -212,7 +212,14 @@ fn main() -> anyhow::Result<()> {
                 verdict(&t, in_db)
             );
         }
-    })?;
+    });
+    let report = match report {
+        Err(e) if album::is_stopped(&e) => {
+            eprintln!("Stopped. Nothing from this rip was kept in the library.");
+            std::process::exit(130);
+        }
+        r => r?,
+    };
     println!("Result: {}", report.verdict().1);
 
     // The files are already in the library; a failed scan only delays them showing up.
@@ -223,6 +230,41 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The rip's stop flag, set by the first Ctrl-C: the rip then stops and takes
+/// back what it filed. A second Ctrl-C quits at once.
+fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
+    static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    let stop = STOP
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    #[cfg(unix)]
+    {
+        extern "C" fn on_sigint(_: libc::c_int) {
+            // Only atomics and async-signal-safe calls here.
+            let again = STOP.get().is_some_and(|s| s.swap(true, Ordering::SeqCst));
+            if again {
+                // SAFETY: _exit is async-signal-safe.
+                unsafe { libc::_exit(130) };
+            }
+            const MSG: &[u8] =
+                b"\nStopping: removing what this rip filed (Ctrl-C again to quit now)\n";
+            // SAFETY: write(2) is async-signal-safe; MSG is a valid buffer.
+            unsafe { libc::write(2, MSG.as_ptr().cast(), MSG.len()) };
+        }
+        // SAFETY: installs a handler that only touches atomics and calls
+        // async-signal-safe functions.
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t,
+            )
+        };
+    }
+    stop
 }
 
 fn open_drive(device: Option<&str>) -> anyhow::Result<Box<dyn CdDrive>> {
