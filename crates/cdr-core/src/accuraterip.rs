@@ -241,8 +241,19 @@ pub fn checksums(track: &[u32], first: bool, last: bool) -> Checksums {
 /// A disc can match several pressings at different offsets; the first one
 /// found is not necessarily the one most submissions agree on.
 pub fn detect_offset(stream: &[u32], sector_450: usize, known: &[(u32, u32)]) -> Option<i32> {
+    detect_offsets(stream, sector_450, known).first().copied()
+}
+
+/// More alignments than real pressings ever have: the sector is too flat to
+/// tell offsets apart (it matches at shift after shift).
+const MAX_ALIGNMENTS: usize = 8;
+
+/// Every offset at which this disc lines up with a pressing in AccurateRip,
+/// the one most submissions agree on first (then the smallest). Empty when
+/// none does, or when the sector can't tell offsets apart.
+pub fn detect_offsets(stream: &[u32], sector_450: usize, known: &[(u32, u32)]) -> Vec<i32> {
     let base = sector_450 as i64;
-    (-OFFSET_SEARCH..OFFSET_SEARCH)
+    let mut found: Vec<(i32, u32)> = (-OFFSET_SEARCH..OFFSET_SEARCH)
         .filter_map(|off| {
             let from = base + off as i64;
             if from < 0 || from as usize + SECTOR_SAMPLES > stream.len() {
@@ -261,8 +272,12 @@ pub fn detect_offset(stream: &[u32], sector_450: usize, known: &[(u32, u32)]) ->
                 .sum();
             (confidence > 0).then_some((off, confidence))
         })
-        .max_by_key(|&(off, confidence)| (confidence, std::cmp::Reverse(off.unsigned_abs())))
-        .map(|(off, _)| off)
+        .collect();
+    if found.len() > MAX_ALIGNMENTS {
+        return Vec::new();
+    }
+    found.sort_by_key(|&(off, confidence)| (std::cmp::Reverse(confidence), off.unsigned_abs()));
+    found.into_iter().map(|(off, _)| off).collect()
 }
 
 /// Highest confidence among database entries matching either checksum
@@ -474,6 +489,24 @@ mod tests {
             (crc_at(OFFSET_CRC_START + 6), 96),
         ];
         assert_eq!(detect_offset(&truth, OFFSET_CRC_START, &known), Some(6));
+        assert_eq!(
+            detect_offsets(&truth, OFFSET_CRC_START, &known),
+            [6, -36],
+            "every pressing it lines up with, best first"
+        );
+    }
+
+    #[test]
+    fn a_flat_sector_tells_no_offset() {
+        // The same value throughout: every shift gives the same checksum.
+        let flat = vec![0x0001_0001u32; 500 * SECTOR_SAMPLES];
+        let crc = flat[..SECTOR_SAMPLES]
+            .iter()
+            .enumerate()
+            .fold(0u32, |a, (j, &s)| {
+                a.wrapping_add(s.wrapping_mul(j as u32 + 1))
+            });
+        assert!(detect_offsets(&flat, OFFSET_CRC_START, &[(crc, 10)]).is_empty());
     }
 
     #[test]

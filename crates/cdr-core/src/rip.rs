@@ -95,6 +95,13 @@ impl<'a> Ripper<'a> {
     /// Finds the drive's read offset from AccurateRip's sector-450 checksums,
     /// reading only a few sectors around sector 450 of each track until one matches.
     pub fn detect_offset(&mut self, subs: &[Submission]) -> Option<i32> {
+        self.detect_offsets(subs).first().copied()
+    }
+
+    /// Every offset at which this disc lines up with a pressing in
+    /// AccurateRip, best first, from the first track that tells; empty when
+    /// none does.
+    pub fn detect_offsets(&mut self, subs: &[Submission]) -> Vec<i32> {
         let margin = (OFFSET_SEARCH as u32).div_ceil(SECTOR_SAMPLES as u32) + 1;
         for (n, i) in audio_tracks(self.toc) {
             let start = self.toc.tracks[i].start;
@@ -108,13 +115,13 @@ impl<'a> Ripper<'a> {
             let lo = (start + OFFSET_CRC_SECTOR - margin) as i64;
             let reading = self.read(lo, lo + 2 * margin as i64 + 1);
             let stream = accuraterip::samples(&reading.pcm);
-            if let Some(offset) =
-                accuraterip::detect_offset(&stream, margin as usize * SECTOR_SAMPLES, &known)
-            {
-                return Some(offset);
+            let offsets =
+                accuraterip::detect_offsets(&stream, margin as usize * SECTOR_SAMPLES, &known);
+            if !offsets.is_empty() {
+                return offsets;
             }
         }
-        None
+        Vec::new()
     }
 
     /// Rips audio track `n` (0-based among audio tracks), verifying against
@@ -655,6 +662,35 @@ mod tests {
         ripper.flush_sectors = 64;
         let r = ripper.rip_track(1, Some(&db), |_, _| {});
         assert_eq!((r.accurate, r.passes), (None, 2));
+    }
+
+    #[test]
+    fn any_pressing_the_disc_lines_up_with_can_confirm_a_track() {
+        // Two pressings line up with this disc; the track only matches the second.
+        let (pcm, toc) = disc();
+        let all = accuraterip::samples(&pcm);
+        let at = 40 * SECTOR_SAMPLES - 30;
+        let theirs = accuraterip::checksums(&all[at..at + 40 * SECTOR_SAMPLES], false, false);
+        let entry = |crc| TrackEntry {
+            confidence: 5,
+            crc,
+            offset_crc: 0,
+        };
+        let db = [Submission {
+            tracks: vec![entry(0), entry(theirs.v2), entry(0), entry(0)],
+        }];
+        let mut drive = FakeDrive::new(pcm.clone(), toc.clone());
+        let mut ripper = Ripper::new(&mut drive, &toc, 0);
+        ripper.flush_sectors = 64;
+        ripper.pressing_offsets = vec![42, -30];
+        let r = ripper.rip_track(1, Some(&db), |_, _| {});
+        assert_eq!(r.accurate, Some((5, "v2")));
+        assert_eq!(r.pressing_offset, Some(-30));
+        assert_eq!(
+            r.samples,
+            truth(&pcm, 40, 80),
+            "audio stays at the drive offset"
+        );
     }
 
     #[test]

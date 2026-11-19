@@ -84,9 +84,10 @@ If none of these gives an offset, the rip stops and asks for one.
 **Pressing offset.** For every disc in AccurateRip, CDR also finds where this
 disc's pressing lines up with the database: it reads about 11 sectors around
 sector 450 of a track and searches ±4 sectors for the database's
-offset-finding checksums, track by track until one matches. A disc can match
-several pressings; the offset with the most AccurateRip confidence behind it
-wins (nearest to 0 on a tie). On 鋼の錬金術師 the first match found was a
+offset-finding checksums, track by track until one matches. A disc can line
+up with several pressings: CDR keeps every such offset, the one with the most
+AccurateRip confidence behind it first (nearest to 0 on a tie). A sector that
+matches at more than 8 offsets is too flat to tell and is skipped. On 鋼の錬金術師 the first match found was a
 pressing with confidence 4–5 and the best one, 42 samples away, had 96. This
 is evidence about the drive, not the drive offset itself.
 
@@ -119,9 +120,9 @@ silently uses 0, which left its files 6 samples off (CDR-4).
 - Checksums v1 and v2 skip the first 2939 samples of the first track and the
   last 2940 of the last track, as AccurateRip does.
 - A track matches if either checksum equals any pressing's entry, first at
-  the drive offset. If nothing matches there and the disc's pressing lines up
-  at another offset, the checksums are also taken at that alignment (from a
-  few extra sectors read around the track). A match there counts as accurate,
+  the drive offset. If nothing matches there, the checksums are also taken at
+  each other offset where the disc lines up with a pressing, best first (from
+  a few extra sectors read around the track). A match there counts as accurate,
   **other pressing**; the audio is still written at the drive offset.
 - The highest confidence among matches is reported.
 
@@ -273,8 +274,6 @@ Every filed album gets two records of the same facts.
 - No cache yet for MusicBrainz lookups.
 - A drive missing from AccurateRip's drive database needs 3 agreeing discs
   before its offset is learned; until then each disc stands in for it.
-- Only one pressing offset is tried per disc (the first track that reveals
-  one).
 - The cache flush runs even on drives without an audio cache (about 7% of
   secure-mode time on a BP71N).
 - HTOA, CD-Text, ISRC and pre-emphasis are not handled; pre-emphasis is only

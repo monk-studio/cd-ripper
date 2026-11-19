@@ -176,7 +176,12 @@ pub fn rip(
     ripper.stop = plan.stop.clone();
     // Where this disc's pressing lines up with AccurateRip: evidence about the
     // drive, and the alignment its tracks may match at.
-    let this_disc = db.as_deref().and_then(|subs| ripper.detect_offset(subs));
+    // Every alignment with a pressing; the best is evidence about the drive.
+    let alignments = db
+        .as_deref()
+        .map(|subs| ripper.detect_offsets(subs))
+        .unwrap_or_default();
+    let this_disc = alignments.first().copied();
     let store_path = plan.data_dir.as_ref().map(|d| d.join("drives.json"));
     let mut store = store_path
         .as_deref()
@@ -215,7 +220,11 @@ pub fn rip(
         store.save(path)?;
     }
     ripper.offset = offset;
-    ripper.pressing_offsets = this_disc.filter(|&o| o != offset).into_iter().collect();
+    ripper.pressing_offsets = alignments
+        .iter()
+        .copied()
+        .filter(|&o| o != offset)
+        .collect();
     on_event(Event::Offset {
         offset,
         source,
