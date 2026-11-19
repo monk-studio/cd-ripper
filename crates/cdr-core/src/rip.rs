@@ -7,6 +7,8 @@
 //! agree. Sectors that never settle are reported as suspicious.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::accuraterip::{self, Checksums, OFFSET_CRC_SECTOR, OFFSET_SEARCH, Submission};
 use crate::drive::CdDrive;
@@ -37,6 +39,9 @@ pub struct Ripper<'a> {
     pub flush_sectors: u32,
     /// Read every track twice, even when AccurateRip confirms the first read.
     pub always_secure: bool,
+    /// Set to stop: reads return silence at once, so the track in progress
+    /// ends quickly. The caller throws its result away.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +82,14 @@ impl<'a> Ripper<'a> {
             pressing_offsets: Vec::new(),
             flush_sectors: FLUSH_SECTORS,
             always_secure: false,
+            stop: None,
         }
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Relaxed))
     }
 
     /// Finds the drive's read offset from AccurateRip's sector-450 checksums,
@@ -303,6 +315,9 @@ impl<'a> Ripper<'a> {
             bad: vec![false; n],
             c2_supported: false,
         };
+        if self.stopped() {
+            return out;
+        }
         let from = lo.max(0);
         let to = hi.min(self.toc.audio_end() as i64);
         let mut at = from;
@@ -343,6 +358,9 @@ impl<'a> Ripper<'a> {
 
     /// Reads `flush_sectors` far from `[lo, hi)` so re-reads come from the disc.
     fn flush_cache(&mut self, lo: i64, hi: i64) {
+        if self.stopped() {
+            return;
+        }
         let end = self.toc.audio_end() as i64;
         let size = (self.flush_sectors as i64).min(end);
         // Whichever end of the disc is further from the region.

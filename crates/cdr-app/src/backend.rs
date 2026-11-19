@@ -3,6 +3,7 @@
 //! fake disc and a fake rip.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use cdr_core::album::{self, Event};
@@ -28,6 +29,8 @@ pub struct RipRequest {
     pub secure: bool,
     /// The drive's read offset the user set; `None`: CDR finds it.
     pub offset: Option<i32>,
+    /// Set to stop the rip; it then fails with [`album::Stopped`].
+    pub stop: Arc<AtomicBool>,
 }
 
 /// A Jellyfin server to tell about new albums.
@@ -134,6 +137,7 @@ impl Backend for Real {
             tags: request.tags,
             offset: request.offset,
             secure: request.secure,
+            stop: Some(request.stop),
             data_dir: cdr_core::offsets::data_dir(),
         };
         album::rip(drive.as_mut(), plan, on_event)

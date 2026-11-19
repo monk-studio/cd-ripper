@@ -2,6 +2,8 @@
 //! reported as they happen through [`Event`]s.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, bail};
 
@@ -31,6 +33,26 @@ pub struct Plan<'a> {
     pub data_dir: Option<PathBuf>,
     /// Read every track twice.
     pub secure: bool,
+    /// Set from another thread to stop the rip ([`Stopped`]).
+    pub stop: Option<Arc<AtomicBool>>,
+}
+
+/// The rip was stopped before it finished. Nothing it wrote to the library
+/// is left there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the rip was stopped")
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// Whether `e` is a rip that was stopped rather than one that failed.
+pub fn is_stopped(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Stopped>().is_some()
 }
 
 #[derive(Debug, Clone)]
@@ -94,8 +116,14 @@ pub fn rip(
     let db = accuraterip::fetch(&ids, ar_cache.as_deref()).context("querying AccurateRip")?;
     on_event(Event::AccurateRip(db.as_ref().map(Vec::len)));
 
+    let stopped = || {
+        plan.stop
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Relaxed))
+    };
     let mut ripper = Ripper::new(drive, toc, 0);
     ripper.always_secure = plan.secure;
+    ripper.stop = plan.stop.clone();
     // Where this disc's pressing lines up with AccurateRip: evidence about the
     // drive, and the alignment its tracks may match at.
     let this_disc = db.as_deref().and_then(|subs| ripper.detect_offset(subs));
@@ -147,7 +175,23 @@ pub fn rip(
     // Encode locally, then copy into the library: a network share only sees finished files.
     let staging = std::env::temp_dir().join(format!("cdr-{}", std::process::id()));
     std::fs::create_dir_all(&staging)?;
+    // What this rip adds to the library, to take back out if it's stopped:
+    // the files it installs, and the folders that don't exist yet.
+    let mut new_dirs: Vec<PathBuf> = Vec::new();
+    for dest in &plan.dests {
+        let mut dir = dest.parent();
+        while let Some(d) = dir.filter(|d| !d.exists()) {
+            if !new_dirs.iter().any(|n| n == d) {
+                new_dirs.push(d.to_path_buf());
+            }
+            dir = d.parent();
+        }
+    }
+    let mut installed: Vec<PathBuf> = Vec::new();
     let result = (|| {
+        if stopped() {
+            bail!(Stopped);
+        }
         let cover = match (plan.dests.is_empty(), plan.release) {
             (false, Some(r)) => coverart::fetch(r).ok().flatten(),
             _ => None,
@@ -164,7 +208,12 @@ pub fn rip(
             let mut folders: Vec<&Path> = plan.dests.iter().filter_map(|d| d.parent()).collect();
             folders.dedup();
             for folder in folders {
-                library::install(&staged, &folder.join(name))?;
+                let dest = folder.join(name);
+                let existed = dest.exists();
+                library::install(&staged, &dest)?;
+                if !existed {
+                    installed.push(dest);
+                }
             }
         }
 
@@ -194,6 +243,9 @@ pub fn rip(
             .map(Path::to_path_buf);
         let audio: Vec<_> = toc.audio_tracks().collect();
         for (n, track) in audio.iter().enumerate() {
+            if stopped() {
+                bail!(Stopped);
+            }
             let rip = ripper.rip_track(n, db.as_deref(), |done, total| {
                 on_event(Event::Progress {
                     track: n,
@@ -201,6 +253,10 @@ pub fn rip(
                     total,
                 })
             });
+            // Its reads came back as silence once stopped: don't keep it.
+            if stopped() {
+                bail!(Stopped);
+            }
             let mut entry = TrackReport::new(track.number, track.start, &rip);
             if let Some(m) = plan.release.and_then(|r| r.tracks.get(n)) {
                 entry.title = Some(m.title.clone());
@@ -210,6 +266,7 @@ pub fn rip(
                 let staged = staging.join(format!("{:02}.flac", track.number));
                 flac::write(&staged, &rip.samples, &plan.tags[n], cover.as_ref())?;
                 library::install(&staged, dest)?;
+                installed.push(dest.clone());
                 std::fs::remove_file(&staged)?;
                 let rel = log_dir.as_deref().and_then(|l| dest.strip_prefix(l).ok());
                 entry.file = Some(rel.unwrap_or(dest).to_string_lossy().into_owned());
@@ -235,5 +292,104 @@ pub fn rip(
         Ok(report)
     })();
     std::fs::remove_dir_all(&staging).ok();
+    if result.as_ref().is_err_and(is_stopped) {
+        for file in &installed {
+            let _ = std::fs::remove_file(file);
+        }
+        // Deepest first; only folders left empty go.
+        new_dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        for dir in &new_dirs {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::toc::Track;
+
+    /// Noise-like audio, so every track reads back as itself.
+    struct Disc(Toc);
+
+    impl CdDrive for Disc {
+        fn read_toc(&mut self) -> anyhow::Result<Toc> {
+            Ok(self.0.clone())
+        }
+
+        fn read_audio(&mut self, lba: u32, buf: &mut [u8]) -> anyhow::Result<()> {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = (lba as usize * 7 + i * 13) as u8;
+            }
+            Ok(())
+        }
+    }
+
+    fn toc() -> Toc {
+        let track = |number, start| Track {
+            number,
+            session: 1,
+            start,
+            is_audio: true,
+            pre_emphasis: false,
+        };
+        Toc {
+            tracks: vec![track(1, 0), track(2, 300), track(3, 600)],
+            leadout: 900,
+        }
+    }
+
+    #[test]
+    fn a_stopped_rip_leaves_nothing_in_the_library() {
+        let root = std::env::temp_dir().join(format!("cdr-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let toc = toc();
+        let ids = DiscIds::from_toc(&toc);
+        // Not in AccurateRip, from the cache: no network in tests.
+        let data = root.join("data");
+        std::fs::create_dir_all(data.join("accuraterip")).unwrap();
+        std::fs::write(
+            data.join("accuraterip")
+                .join(format!("dBAR-{}.missing", ids.name())),
+            b"",
+        )
+        .unwrap();
+        let library = root.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let disc_id = DiscToc::from_toc(&toc).disc_id();
+        let (tags, dests) =
+            destinations(Some(&library), library::DEFAULT_TEMPLATE, None, &disc_id, 3);
+        let stop = Arc::new(AtomicBool::new(false));
+        let plan = Plan {
+            toc: &toc,
+            release: None,
+            dests: dests.clone(),
+            tags,
+            offset: Some(0),
+            data_dir: Some(data),
+            secure: false,
+            stop: Some(stop.clone()),
+        };
+        let mut first_filed = false;
+        let result = rip(&mut Disc(toc.clone()), plan, |e| {
+            if let Event::TrackDone { track: 0, .. } = e {
+                first_filed = dests[0].exists();
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(
+            first_filed,
+            "the first track was in the library before the stop"
+        );
+        assert!(is_stopped(&result.unwrap_err()));
+        assert!(!dests[0].exists());
+        assert_eq!(
+            std::fs::read_dir(&library).unwrap().count(),
+            0,
+            "the folders it made are gone too"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

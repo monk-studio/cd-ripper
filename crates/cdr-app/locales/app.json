@@ -327,5 +327,17 @@
   "start.no_drive.others": {
     "en": "Other USB drives work too. CDR finds each drive's read offset from AccurateRip's list of drives or from the discs you rip.",
     "zh-CN": "其他 USB 光驱也能用。CDR 会从 AccurateRip 的光驱列表或你抓过的光盘中找出每台光驱的读取偏移。"
+  },
+  "action.stop": {
+    "en": "Stop",
+    "zh-CN": "停止"
+  },
+  "action.stopping": {
+    "en": "Stopping…",
+    "zh-CN": "正在停止…"
+  },
+  "rip.stopped": {
+    "en": "Stopped. Nothing from this rip was kept in the library.",
+    "zh-CN": "已停止。这次抓取的文件都没有留在曲库里。"
   }
 }

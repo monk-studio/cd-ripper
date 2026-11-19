@@ -76,6 +76,8 @@ struct Fake {
     denied: AtomicBool,
     /// No optical drive is connected.
     no_drive: AtomicBool,
+    /// The rip runs until it is stopped.
+    endless: AtomicBool,
     /// What the system opens on insert.
     auto_open: Mutex<Option<AutoOpen>>,
     /// Replaces the disc's MusicBrainz releases.
@@ -145,6 +147,19 @@ impl Backend for Fake {
         on_event: &mut dyn FnMut(Event),
     ) -> anyhow::Result<RipReport> {
         self.secure.store(request.secure, Ordering::SeqCst);
+        if self.endless.load(Ordering::SeqCst) {
+            on_event(Event::Progress {
+                track: 0,
+                done: 10,
+                total: 100,
+            });
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !request.stop.load(Ordering::SeqCst) {
+                anyhow::ensure!(std::time::Instant::now() < give_up, "never stopped");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return Err(cdr_core::album::Stopped.into());
+        }
         let dests = request.dests.clone();
         let mut tracks = Vec::new();
         for (n, t) in disc.toc.tracks.iter().enumerate() {
@@ -625,4 +640,24 @@ fn a_drive_without_a_disc_asks_for_one() {
     app.wait_for("text:Insert an audio CD").unwrap();
     app.wait(std::time::Duration::from_secs(3)).unwrap();
     assert!(!app.shows("Connect a CD drive"));
+}
+
+#[test]
+fn a_rip_can_be_stopped_and_started_again() {
+    let _turn = serial();
+    let fake = Arc::new(Fake::default());
+    fake.endless.store(true, Ordering::SeqCst);
+    let lib = library();
+    let mut app = start_with(fake.clone(), &[(storage_keys::LIBRARY, &lib)]);
+    app.wait_for("text:12 hugs (like butterflies)").unwrap();
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Stop").unwrap();
+    app.press("text:Stop").unwrap();
+    app.wait_for("text:/Nothing from this rip was kept/")
+        .unwrap();
+    // Ready again: the same disc can be ripped.
+    fake.endless.store(false, Ordering::SeqCst);
+    app.press("text:Rip CD").unwrap();
+    app.wait_for("text:Perfect rip").unwrap();
+    assert!(!app.shows("Nothing from this rip was kept"));
 }

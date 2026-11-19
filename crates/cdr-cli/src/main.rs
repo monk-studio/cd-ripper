@@ -146,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         offset: args.offset,
         secure: args.secure,
         data_dir: cdr_core::offsets::data_dir(),
+        stop: None,
     };
     let report = album::rip(drive.as_mut(), plan, |event| match event {
         Event::AccurateRip(Some(n)) => {

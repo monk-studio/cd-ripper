@@ -8,6 +8,8 @@ mod look;
 mod settings;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use backend::{AutoOpen, Disc, RipRequest, backend, is_access_denied};
@@ -55,6 +57,16 @@ fn by_language(json: &str) -> String {
 #[native_module("cdr/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
+}
+
+/// A running rip's stop flag; the same flag is the same rip.
+#[derive(Clone)]
+struct StopFlag(Arc<AtomicBool>);
+
+impl PartialEq for StopFlag {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -107,6 +119,9 @@ pub fn App() -> impl IntoElement {
     let message = signal(None::<String>);
     let offset_line = signal(String::new());
     let started = signal(None::<Instant>);
+    // The running rip's stop flag; and whether Stop was pressed.
+    let stop_flag = signal(None::<StopFlag>);
+    let stopping = signal(false);
     // Tasks live as long as the UI they were started in. Handlers run inside
     // buttons that come and go (Rip disappears once ripping starts), so the
     // tasks they start belong to the app instead.
@@ -287,9 +302,13 @@ pub fn App() -> impl IntoElement {
         picking.set(false);
         offset_line.set(String::new());
         rows.set(rows_for(&d, release.as_ref()));
+        let shown = release.clone();
         started.set(Some(Instant::now()));
         phase.set(Phase::Ripping);
 
+        let stop = Arc::new(AtomicBool::new(false));
+        stop_flag.set(Some(StopFlag(stop.clone())));
+        stopping.set(false);
         let secure_now = settings.secure.get();
         let server = settings.server();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
@@ -300,6 +319,7 @@ pub fn App() -> impl IntoElement {
                 tags,
                 secure: secure_now,
                 offset,
+                stop,
             };
             backend().rip(&d, request, &mut |event| {
                 let _ = tx.send(event);
@@ -347,9 +367,19 @@ pub fn App() -> impl IntoElement {
                             ));
                         }
                     }
+                    Ok(Err(e)) if album::is_stopped(&e) => {
+                        // Back to where it was before Rip, with nothing kept.
+                        if let Some(d) = disc.get() {
+                            rows.set(rows_for(&d, shown.as_ref()));
+                        }
+                        message.set(Some(t!("rip.stopped")));
+                        phase.set(Phase::Ready);
+                    }
                     Ok(Err(e)) => phase.set(Phase::Failed(format!("{e:#}"))),
                     Err(e) => phase.set(Phase::Failed(e.to_string())),
                 }
+                stop_flag.set(None);
+                stopping.set(false);
             })
         });
     };
@@ -385,6 +415,13 @@ pub fn App() -> impl IntoElement {
                 }
             })
         });
+    };
+
+    let stop_rip = move || {
+        if let Some(flag) = stop_flag.get() {
+            flag.0.store(true, Ordering::Relaxed);
+            stopping.set(true);
+        }
     };
 
     let releases = move || disc.get().map(|d| d.releases).unwrap_or_default();
@@ -466,9 +503,11 @@ pub fn App() -> impl IntoElement {
                         album_folder,
                         offset_line,
                         rescanned,
+                        stopping,
                         Actions {
                             choose_folder,
                             start_rip,
+                            stop_rip,
                             reveal,
                             eject,
                         },
@@ -1208,11 +1247,12 @@ fn track_list(rows: Signal<Vec<Row>>, phase: Signal<Phase>) -> impl IntoElement 
 }
 
 /// What the footer's buttons do.
-struct Actions<A, B, C, D> {
+struct Actions<A, B, C, D, E> {
     choose_folder: A,
     start_rip: B,
-    reveal: C,
-    eject: D,
+    stop_rip: C,
+    reveal: D,
+    eject: E,
 }
 
 /// Where the album goes, and what to do next.
@@ -1222,7 +1262,9 @@ fn footer(
     album_folder: impl Fn() -> Option<String> + Copy + 'static,
     offset_line: Signal<String>,
     rescanned: Signal<Option<Result<Vec<String>, String>>>,
+    stopping: Signal<bool>,
     actions: Actions<
+        impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
         impl Fn() + Clone + 'static,
@@ -1232,6 +1274,7 @@ fn footer(
     let Actions {
         choose_folder,
         start_rip,
+        stop_rip,
         reveal,
         eject,
     } = actions;
@@ -1279,6 +1322,21 @@ fn footer(
         .child(when(move || ready() && library.get().is_none(), {
             let choose_folder = choose_folder.clone();
             move || small_button(move || t!("library.choose"), None, choose_folder.clone())
+        }))
+        .child(when(move || phase.get() == Phase::Ripping, {
+            let stop_rip = stop_rip.clone();
+            move || {
+                secondary_button(
+                    move || {
+                        if stopping.get() {
+                            t!("action.stopping")
+                        } else {
+                            t!("action.stop")
+                        }
+                    },
+                    stop_rip.clone(),
+                )
+            }
         }))
         .child(when(move || matches!(phase.get(), Phase::Done(..)), {
             let reveal = reveal.clone();

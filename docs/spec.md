@@ -203,6 +203,13 @@ Without a release only the track numbering and the disc ID are written.
 - Files are encoded in a local temporary folder, then copied into the library
   as a hidden `.<name>.part` file and renamed into place. The copy is retried
   3 times (1 s, then 2 s apart); a final failure leaves no partial file.
+- **Stopping.** A rip can be stopped (the Mac app's Stop button). Reads
+  stop within one 32-sector read, the track in progress is thrown away, and
+  everything the rip put into the library is removed: the tracks filed so
+  far, a cover it added, and the folders it created if they are left empty.
+  Files that were there before are kept. The app then shows the disc ready
+  to rip again. (A rip that fails for another reason keeps the tracks filed
+  before the failure.)
 
 *Why:* libraries usually live on network shares, and their servers scan
 folders while we write. They should only ever see finished files.
